@@ -450,3 +450,31 @@ AUD-003/004/008/019/022/025 gain explicit legacy-upgrade, command invalidation, 
 At `1862f59b692ff09de1f4764473407db3e8a4e519`, actual populated 34→35→36→37 migrations left READING/NOT_READ/null-claim files unmarked. Signed legacy completion returned 409, polling delivered no fresh read, and subsequent expiry falsely made PENDING/ACKNOWLEDGED work FAILED. Already EXPIRED command history instead left the file permanently READING. A genuine modern queued command retained its file/command and completed, proving that null file authority alone cannot classify legacy queued ownership.
 
 Forward migration 38 admits that missing legacy state with exact bound uncaptured command evidence and excludes active captured commands. A command-owner expression index avoids unrelated-history scans. Recovery preserves queued modern command ownership before its cap and after its established locks; queued invalidation cannot expire captured commands. The permanent upgrade regression retains original 37 admission and all prior cases, and adds real signed-route queued expiry/completion, modern-owner barrier, root denial, physical-generation, checksum and late-reply controls. Migrations 35–37 remain unchanged. Final release evidence and Git identity remain external; no production deployment or scheduling activation is implied.
+
+### Release certification HOLD closure
+
+The certification at `7b7520268ae850eeb42022b08e76f93d2caebcdf` found that a
+valid human session plus forged forwarded authority accepted an unrelated
+Origin. Baseline production HTTP repeated the 200/revocation. Human mutation
+origins now come from explicit application/preview configuration; request
+headers cannot create trust. Actual Proxy/route regressions cover malformed,
+duplicated and conflicting headers and legitimate human/machine/service/auth
+workflows.
+
+The earlier Windows folder-Undo failure is reproduced as a real NTFS ownership
+collision: distinct inode IDs `9288674232275576` and `9288674232275577` became
+the same Number, and the old journal removed the replacement. IDs were measured
+independently using BigInt before and after rename. A separate deterministic
+filesystem barrier exposed replacement after verification but before public
+rmdir. Exact encoded identities and verified private folder capture close both
+ownership gaps. Unsafe legacy journal proof is preserved and fails closed;
+missing capture proof remains UNKNOWN. No authority or migration is backfilled.
+
+Permanent controls retain the original folder assertion and add real NTFS
+collision, safe/unsafe historical formats, captured replacement preservation,
+actual process termination, concurrent Undo owners and idempotent recovery.
+AUD-005/020/021 receive these stronger controls; the remaining original 25 and
+all three closure boundaries retain their complete production-path gates.
+Final validation, patch/blob manifest and local commit identity are recorded
+externally. Mac physical and staging acceptance remain separate, unexecuted
+gates; this change neither activates scheduling nor publishes a Bridge release.

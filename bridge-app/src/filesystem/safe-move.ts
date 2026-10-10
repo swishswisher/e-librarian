@@ -3,10 +3,16 @@ import { constants } from "node:fs";
 import { link, lstat, mkdtemp, open, rename, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 
-export type PhysicalFileIdentity = { dev: string; ino: string; checksum: string };
-export type SourceCapture = { directory: string; dev: string; ino: string };
-function sameIdentity(stats: { dev: number; ino: number }, identity: { dev: string; ino: string }) {
-  return String(stats.dev) === identity.dev && String(stats.ino) === identity.ino;
+export type PhysicalDeviceIdentity = { dev: string; ino: string; encoding?: "bigint-v1" };
+export type PhysicalFileIdentity = PhysicalDeviceIdentity & { checksum: string };
+export type SourceCapture = PhysicalDeviceIdentity & { directory: string };
+export function usablePhysicalIdentity(identity: PhysicalDeviceIdentity | null | undefined) {
+  if (!identity || (identity.encoding !== undefined && identity.encoding !== "bigint-v1")) return false;
+  return [identity.dev, identity.ino].every(value => typeof value === "string" && /^(0|[1-9]\d{0,19})$/u.test(value) &&
+    BigInt(value) <= (identity.encoding === "bigint-v1" ? BigInt("18446744073709551615") : BigInt(Number.MAX_SAFE_INTEGER)));
+}
+export function samePhysicalIdentity(stats: { dev: bigint; ino: bigint }, identity: PhysicalDeviceIdentity | null | undefined) {
+  return usablePhysicalIdentity(identity) && stats.dev.toString() === identity!.dev && stats.ino.toString() === identity!.ino;
 }
 
 // Never unlink the public source pathname: an editor can atomically replace it
@@ -15,15 +21,17 @@ function sameIdentity(stats: { dev: number; ino: number }, identity: { dev: stri
 export async function removeOwnedSource(source: string, identity: PhysicalFileIdentity,
   hooks: { captureIntent?: (capture: SourceCapture) => Promise<void>; beforeCapture?: () => Promise<void>;
     captured?: () => Promise<void> } = {}, admitted?: SourceCapture, allowSourceChanges = true) {
+  if (!usablePhysicalIdentity(identity) || (admitted && !usablePhysicalIdentity(admitted)))
+    throw new Error("Legacy physical identity cannot establish exact ownership; preserve it for recovery.");
   const capture = admitted ?? await (async () => {
     const directory = await mkdtemp(path.join(path.dirname(source), ".nsn-move-"));
-    const stats = await lstat(directory);
-    const value = { directory, dev: String(stats.dev), ino: String(stats.ino) };
+    const stats = await lstat(directory, { bigint: true });
+    const value: SourceCapture = { directory, dev: stats.dev.toString(), ino: stats.ino.toString(), encoding: "bigint-v1" };
     await syncDirectory(path.dirname(source)); await hooks.captureIntent?.(value);
     return value;
   })();
-  const directoryStats = await lstat(capture.directory);
-  if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink() || !sameIdentity(directoryStats, capture) ||
+  const directoryStats = await lstat(capture.directory, { bigint: true });
+  if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink() || !samePhysicalIdentity(directoryStats, capture) ||
       path.dirname(capture.directory) !== path.dirname(source) || !path.basename(capture.directory).startsWith(".nsn-move-"))
     throw new Error("The private source capture lost its ownership; recovery is required.");
   const captured = path.join(capture.directory, "source");
@@ -62,14 +70,14 @@ export async function syncDirectory(directoryPath: string) {
 export async function physicalFileIdentity(filePath: string): Promise<PhysicalFileIdentity> {
   const file = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
-    const before = await file.stat();
+    const before = await file.stat({ bigint: true });
     if (!before.isFile()) throw new Error("A regular source file is required.");
     const hash = createHash("sha256");
     for await (const bytes of file.createReadStream({ autoClose: false })) hash.update(bytes);
-    const after = await file.stat();
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs)
+    const after = await file.stat({ bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs)
       throw new Error("The physical source changed during verification.");
-    return { dev: String(before.dev), ino: String(before.ino), checksum: hash.digest("hex") };
+    return { dev: before.dev.toString(), ino: before.ino.toString(), checksum: hash.digest("hex"), encoding: "bigint-v1" };
   } finally { await file.close(); }
 }
 

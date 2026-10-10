@@ -64,6 +64,16 @@ Intentional exceptions:
 
 **FILE-2.** Path-only joins cannot attach new content/corrections to an old typed identity, mark a newly replaced file deleted, redirect historical provenance or restore a different file during Undo. Temporary reads verify the scanned expected checksum plus before/after physical identity. Commit uses the same source generation. Strong identity checks also apply to metadata/AI/media fallbacks and replay.
 
+Native action journals capture device/inode IDs with BigInt filesystem statistics,
+serialize exact decimal strings and label new identities `bigint-v1`. Untagged
+legacy identities are usable for a new effect only when both numbers are exact
+safe integers. Unsafe or unknown encodings retain historical bytes and fail
+closed; no current identity is backfilled into old proof. Folder Undo captures
+the public name into an owned private directory before removal, verifies the
+captured identity and emptiness, and journals that verified phase. A raced
+unrelated capture remains intact and unresolved. INTENT plus absent public
+names cannot prove removal. Historical completed records remain readable.
+
 **FILE-3.** Keep physical copies available for root authorization/discovery. Collapse byte-identical semantic copies only after complete effective typed/version metadata agrees. Copies are not independent corroboration or contradictory revisions. Complete-family ambiguity fails closed before bounded source selection.
 
 ## F. Transactions and physical atomicity
@@ -109,6 +119,11 @@ Live native failure settlement also retains UNKNOWN when an existing action jour
 **PRIVACY-1.** Original local files/unrestricted absolute paths/media remain local physical truth. Only explicitly authorized temporary extraction and the approved bounded derived evidence cross to server/provider. Follow the exact boundaries in [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) and existing Bridge/answering documents. Raw temporary command replies are stripped before cloud result persistence; local outboxes are temporary delivery state. No logging/error/retry can expand the authorized disclosure.
 
 **PRIVACY-2.** Human APIs require allowlisted human sessions and same-origin state-changing requests. Only exact implemented signed-machine routes are public; release manifest and one-use pairing redemption are explicit exceptions. Device signatures/nonce/expiry and root bindings are independently checked. Revoked/hidden/historical evidence cannot indirectly ground current answers.
+
+Human mutation origin trust comes only from the configured application origin
+and additional explicitly authorized exact preview origins, never request
+Host/Forwarded headers or URL. Missing, malformed, duplicated or untrusted
+Origin headers fail closed. See [AUTH_ORIGIN_OPERATIONS.md](AUTH_ORIGIN_OPERATIONS.md).
 
 **PRIVACY-3.** Ordinary validation uses only disposable 127.0.0.1:5432/nsn_library_machine_test, synthetic local files, mocked AI and **unset** OPENAI_API_KEY. Never use production Neon/private production files/paid AI without explicit authorization. No generated Bridge dist, master changes, push, publication or promotion in this audit workflow.
 

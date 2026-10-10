@@ -31,6 +31,16 @@ Before changing production behavior, identify its authoritative owner in [SYSTEM
 
 Choose regressions by invariant, not only by changed filename. Authority changes require conflict/retry/derived visibility controls; root changes require each canonical state and sibling admission/dispatch; lifecycle changes require process death and partial completion; retrieval changes require owner starvation/history/provenance; physical changes require explicit authorization, external mutation, collision, partial Undo and replay. Keep tests deterministic with DB locks/barriers, injected child-write failures and operation/query counters.
 
+Human origin changes additionally require `human-origin-boundary.test.ts` with
+actual Proxy/route HTTP, the original forwarded spoof, duplicate/conflicting
+authority headers, exact primary/preview/local controls, malformed Origin,
+session denial, logout, OAuth entry/callback, signed-device nonce and protected
+scheduler controls. Native identity/removal changes require the real NTFS
+collision in `directory-identity.test.ts` plus exact/legacy identities, private
+folder capture races, competing Undo owners, actual child termination, replay
+and missing-proof controls in `physical-recovery-invariants.test.ts`. Preserve
+execution/Undo, native command recovery and all three closure protections.
+
 Pre-35 observation repair additionally requires `legacy-observation-upgrade.test.ts`: a populated actual 34→35→36→37 upgrade with active/expired owners, expired/acknowledged commands, ordinary polling through fresh read and scan completion, absent Bridge/reconnection, production revoke/key/revision retirement, physical generation/source denial, competing workers, selected-owner races, transactional fault/retry, late reports, current-owner/history/human/Memory controls and a 61-owner bounded drain. Admission is migration-scoped; ordinary newly malformed authority is not repaired by guessing. Preserve the explicit modern missing-authority fail-closed controls and all earlier migration SQL.
 
 Queued legacy recovery also requires actual 37→38 admission and signed poll/ack/complete route coverage: READING/NOT_READ/null claim with PENDING, ACKNOWLEDGED or EXPIRED uncaptured commands; expiry cannot falsely fail the upgraded file or strand terminal command history. A genuine command queued by the production producer between 36/37 and a modern command committed while selected repair waits must retain ownership and complete. Check root revocation, physical generation, changed checksum and late replies on this queued path. Preserve all original 79-owner migration-37 assertions, reviewed history and 35–37 definitions; the forward command-owner index supports bounded recovery without unrelated-history scans.

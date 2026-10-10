@@ -10,6 +10,14 @@ The installed Electron Bridge and its loopback compatibility service own physica
 
 There are two approved human identities in this installation, authenticated by allowlisted Google subject/email and signed session cookies. The database has no per-user root ownership column. Human administration is installation-wide; optional permitted-root restrictions on Search/Ask remain additional restrictions. Device authentication is distinct: Ed25519 request signatures bind method, pathname, body, device, timestamp and a one-use persisted nonce. Pairing redemption proves possession of a short-lived one-use pairing code. Public release manifests disclose release metadata only.
 
+Human mutation origins are configured server authority; request Host/Forwarded
+headers and URL cannot supply that authority. Exact local and approved deployment
+origins are documented in [AUTH_ORIGIN_OPERATIONS.md](AUTH_ORIGIN_OPERATIONS.md).
+Native per-action journals retain exact BigInt device/inode strings with a new
+identity encoding tag. Legacy unsafe IDs remain historical/unresolved rather
+than being rewritten. Folder Undo, like source removal, verifies the privately
+captured owner before deletion; unrelated captures are preserved for inspection.
+
 Canonical current readable root means enabled, read granted, CONNECTED, no disconnect/hide/merge timestamp and no canonical redirect. The Prisma, SQL and in-memory definitions live in `src/lib/bridge/current-readable-root.ts`. A device command additionally requires the same connected library, device and native root, and an eligible paired device. Physical execution/Undo additionally requires explicit action permissions, approved immutable actions and verified physical identity. Historical navigation and cessation/revocation commands deliberately have different purposes; see the exceptions in the invariants document.
 
 ## Subsystem map

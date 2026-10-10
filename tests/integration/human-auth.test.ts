@@ -25,6 +25,9 @@ const originalEnvironment = {
   AUTH_GOOGLE_SECRET: process.env.AUTH_GOOGLE_SECRET,
   AUTH_SECRET: process.env.AUTH_SECRET,
   NSN_AUTH_ALLOWED_USERS_JSON: process.env.NSN_AUTH_ALLOWED_USERS_JSON,
+  NSN_LIBRARIAN_APP_URL: process.env.NSN_LIBRARIAN_APP_URL,
+  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+  NSN_AUTH_TRUSTED_ORIGINS: process.env.NSN_AUTH_TRUSTED_ORIGINS,
 };
 
 function approvedUsers() {
@@ -45,6 +48,8 @@ function approvedUsers() {
 }
 
 function configureAuth() {
+  process.env.NSN_LIBRARIAN_APP_URL = "https://nsn-librarian.vercel.app";
+  delete process.env.NSN_AUTH_TRUSTED_ORIGINS;
   process.env.AUTH_SECRET =
     "test-auth-secret-that-is-longer-than-thirty-two-characters";
   process.env.AUTH_GOOGLE_ID = "google-client-id.apps.googleusercontent.com";
@@ -236,6 +241,7 @@ test("human-only device revocation and unknown device descendants fail closed at
 });
 
 test("blocks open redirects and cross-origin state-changing requests", () => {
+  configureAuth();
   assert.equal(safeInternalPath("https://example.com"), "/admin/library");
   assert.equal(safeInternalPath("//example.com"), "/admin/library");
   assert.equal(safeInternalPath("/admin/library/review"), "/admin/library/review");

@@ -1,14 +1,14 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, rmdir } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rename, rmdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { readLocalJson, withLocalStoreLock, writeLocalJson } from "../main/local-json-store";
-import { moveWithoutReplacement, physicalFileIdentity, removeOwnedSource, syncDirectory, type PhysicalFileIdentity, type SourceCapture } from "./safe-move";
+import { moveWithoutReplacement, physicalFileIdentity, removeOwnedSource, samePhysicalIdentity, usablePhysicalIdentity, syncDirectory, type PhysicalFileIdentity, type SourceCapture } from "./safe-move";
 import { normalizeRelativePath } from "./safety";
 
 type Journal = { version: 1; owner: string; kind: "MOVE" | "CREATE_FOLDER" | "REMOVE_FOLDER";
   source: string | null; destination: string; state: "INTENT" | "LINKED" | "COMPLETED";
-  identity: PhysicalFileIdentity | null; created: boolean; originalOwner?: string; modifiedAt?: string; sizeBytes?: string; sourceCapture?: SourceCapture };
+  identity: PhysicalFileIdentity | null; created: boolean; originalOwner?: string; modifiedAt?: string; sizeBytes?: string; sourceCapture?: SourceCapture; directoryCapture?: SourceCapture };
 export class PhysicalRecoveryRequired extends Error {
   code = "COMMAND_RECOVERY_REQUIRED";
 }
@@ -25,17 +25,21 @@ async function load(owner: string) {
           typeof entry.identity.dev !== "string" || typeof entry.identity.ino !== "string" || !/^[a-f0-9]{64}$/u.test(entry.identity.checksum))) ||
         (entry.sourceCapture && (entry.kind !== "MOVE" || typeof entry.sourceCapture.directory !== "string" ||
           typeof entry.sourceCapture.dev !== "string" || typeof entry.sourceCapture.ino !== "string" ||
-          path.dirname(entry.sourceCapture.directory) !== path.dirname(entry.source!) || !path.basename(entry.sourceCapture.directory).startsWith(".nsn-move-"))))
+          path.dirname(entry.sourceCapture.directory) !== path.dirname(entry.source!) || !path.basename(entry.sourceCapture.directory).startsWith(".nsn-move-"))) ||
+        (entry.directoryCapture && (entry.kind !== "REMOVE_FOLDER" || typeof entry.directoryCapture.directory !== "string" ||
+          !usablePhysicalIdentity(entry.directoryCapture) || typeof entry.originalOwner !== "string" ||
+          path.dirname(entry.directoryCapture.directory) !== path.dirname(entry.destination) ||
+          !path.basename(entry.directoryCapture.directory).startsWith(".nsn-remove-"))))
       throw new PhysicalRecoveryRequired("The physical action journal is corrupt; preserve it for recovery.");
     return entry;
   });
 }
 export async function hasPhysicalActionJournal(owner: string) { return Boolean(await load(owner)); }
 function matches(left: PhysicalFileIdentity, right: PhysicalFileIdentity) {
-  return left.dev === right.dev && left.ino === right.ino && left.checksum === right.checksum;
+  return usablePhysicalIdentity(left) && usablePhysicalIdentity(right) && left.dev === right.dev && left.ino === right.ino && left.checksum === right.checksum;
 }
 async function statOrAbsent(target: string) {
-  try { return await lstat(target); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  try { return await lstat(target, { bigint: true }); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
 }
 async function completeMove(entry: Journal) {
   const stats = await lstat(entry.destination);
@@ -45,6 +49,8 @@ async function completeMove(entry: Journal) {
 }
 async function recoverMove(entry: Journal, finishOwnedLink: boolean) {
   if (entry.state === "COMPLETED") return entry;
+  if (!usablePhysicalIdentity(entry.identity) || (entry.sourceCapture && !usablePhysicalIdentity(entry.sourceCapture)))
+    throw new PhysicalRecoveryRequired("Legacy physical identity cannot establish exact ownership; preserve it for recovery.");
   const source = await statOrAbsent(entry.source!); const destination = await statOrAbsent(entry.destination);
   if (!destination) return null; // Durable intent preceded the exclusive link.
   const destinationIdentity = destination.isFile() && !destination.isSymbolicLink() ? await physicalFileIdentity(entry.destination) : null;
@@ -68,7 +74,7 @@ async function recoverMove(entry: Journal, finishOwnedLink: boolean) {
     }, captureStats ? capture : undefined); }
     catch { throw new PhysicalRecoveryRequired("The source capture needs ownership recovery; preserve its bytes."); }
   } else if (captureStats) {
-    if (!captureStats.isDirectory() || captureStats.isSymbolicLink() || String(captureStats.dev) !== capture!.dev || String(captureStats.ino) !== capture!.ino)
+    if (!captureStats.isDirectory() || captureStats.isSymbolicLink() || !samePhysicalIdentity(captureStats, capture))
       throw new PhysicalRecoveryRequired("The private source capture lost its ownership.");
     try { await rmdir(capture!.directory); await syncDirectory(path.dirname(entry.source!)); }
     catch { throw new PhysicalRecoveryRequired("The private source capture is not empty; preserve it for recovery."); }
@@ -109,30 +115,64 @@ export async function journaledCreateFolder(owner: string, destination: string) 
     await writeLocalJson(journalPath(owner), entry);
     try { await mkdir(destination); entry.created = true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-    const stats = await lstat(destination);
+    const stats = await lstat(destination, { bigint: true });
     if (!stats.isDirectory() || stats.isSymbolicLink()) throw new PhysicalRecoveryRequired("Folder destination is not a safe directory.");
-    entry.identity = { dev: String(stats.dev), ino: String(stats.ino), checksum: "" }; entry.state = "COMPLETED";
+    entry.identity = { dev: stats.dev.toString(), ino: stats.ino.toString(), checksum: "", encoding: "bigint-v1" }; entry.state = "COMPLETED";
     await syncDirectory(path.dirname(destination)); await writeLocalJson(journalPath(owner), entry);
     return entry;
   });
 }
-export async function journaledRemoveFolder(owner: string, originalOwner: string, target: string) {
+async function finishDirectoryRemoval(entry: Journal) {
+  const capture = entry.directoryCapture;
+  const container = capture ? await statOrAbsent(capture.directory) : null;
+  if (!capture || !container?.isDirectory() || container.isSymbolicLink() || !samePhysicalIdentity(container, capture) ||
+      !usablePhysicalIdentity(entry.identity))
+    throw new PhysicalRecoveryRequired("The private folder capture cannot establish ownership; preserve it for recovery.");
+  const captured = path.join(capture.directory, "directory"), stats = await statOrAbsent(captured);
+  if (stats) {
+    if (!stats.isDirectory() || stats.isSymbolicLink() || !samePhysicalIdentity(stats, entry.identity) || (await readdir(captured)).length)
+      throw new PhysicalRecoveryRequired("The captured folder is not the empty directory owned by this execution; preserve it for recovery.");
+    // LINKED proves that the exact owned directory reached the private capture.
+    // INTENT plus absence alone never proves that a removal occurred.
+    entry.state = "LINKED"; await writeLocalJson(journalPath(entry.owner), entry);
+    await rmdir(captured); await syncDirectory(capture.directory);
+  } else if (entry.state !== "LINKED") {
+    throw new PhysicalRecoveryRequired("The interrupted folder capture has no verified removal proof.");
+  }
+  entry.state = "COMPLETED"; await writeLocalJson(journalPath(entry.owner), entry);
+  const remaining = await statOrAbsent(capture.directory);
+  if (!remaining?.isDirectory() || remaining.isSymbolicLink() || !samePhysicalIdentity(remaining, capture) || (await readdir(capture.directory)).length)
+    throw new PhysicalRecoveryRequired("The completed folder capture needs cleanup inspection.");
+  await rmdir(capture.directory); await syncDirectory(path.dirname(entry.destination));
+  return entry;
+}
+export async function journaledRemoveFolder(owner: string, originalOwner: string, target: string,
+  afterCaptureIntent?: () => Promise<void>, afterCaptured?: () => Promise<void>) {
   return withLocalStoreLock(journalPath(owner), async () => {
     const existing = await load(owner);
     if (existing && (existing.kind !== "REMOVE_FOLDER" || existing.source !== target || existing.destination !== target || existing.originalOwner !== originalOwner))
       throw new PhysicalRecoveryRequired("Folder removal journal authority changed.");
     if (existing?.state === "COMPLETED") return existing;
+    if (existing?.directoryCapture) return finishDirectoryRemoval(existing);
     const original = await load(originalOwner), stats = await statOrAbsent(target);
-    if (!stats && existing?.state === "INTENT") {
-      existing.state = "COMPLETED"; await writeLocalJson(journalPath(owner), existing); return existing;
-    }
     if (!original?.created || original.state !== "COMPLETED" || original.kind !== "CREATE_FOLDER" || original.destination !== target ||
-        !stats?.isDirectory() || stats.isSymbolicLink() || String(stats.dev) !== original.identity?.dev || String(stats.ino) !== original.identity?.ino ||
+        !stats?.isDirectory() || stats.isSymbolicLink() || !samePhysicalIdentity(stats, original.identity) ||
         (await readdir(target)).length !== 0) throw new PhysicalRecoveryRequired("The empty folder is not the directory owned by this execution.");
+    const directory = await mkdtemp(path.join(path.dirname(target), ".nsn-remove-"));
+    const container = await lstat(directory, { bigint: true });
     const entry: Journal = { version: 1, owner, kind: "REMOVE_FOLDER", source: target, destination: target,
-      identity: original.identity, originalOwner, created: false, state: "INTENT" };
-    await writeLocalJson(journalPath(owner), entry); await rmdir(target); await syncDirectory(path.dirname(target));
-    entry.state = "COMPLETED"; await writeLocalJson(journalPath(owner), entry); return entry;
+      identity: original.identity, originalOwner, created: false, state: "INTENT",
+      directoryCapture: { directory, dev: container.dev.toString(), ino: container.ino.toString(), encoding: "bigint-v1" } };
+    await syncDirectory(path.dirname(target)); await writeLocalJson(journalPath(owner), entry);
+    await afterCaptureIntent?.();
+    // Never rmdir the public name after a check: capture first, then verify what
+    // rename actually captured. A raced unrelated folder remains intact inside
+    // the private capture and explicitly unresolved, never deleted/restored over
+    // another public entry. Directory hard links cannot provide safe restoration.
+    await rename(target, path.join(directory, "directory"));
+    await syncDirectory(path.dirname(target)); await syncDirectory(directory);
+    await afterCaptured?.();
+    return finishDirectoryRemoval(entry);
   });
 }
 // This path records only already-owned outcomes; it cannot admit a new effect.
@@ -153,9 +193,7 @@ export async function recoverPhysicalAction(owner: string, expected?: PhysicalAc
       throw new PhysicalRecoveryRequired("Historical physical journal authority does not match this action.");
     if (!entry || entry.state === "COMPLETED") return entry;
     if (entry.kind === "MOVE") return recoverMove(entry, false);
-    if (entry.kind === "REMOVE_FOLDER" && !await statOrAbsent(entry.destination)) {
-      entry.state = "COMPLETED"; await writeLocalJson(journalPath(owner), entry); return entry;
-    }
+    if (entry.kind === "REMOVE_FOLDER" && entry.directoryCapture) return finishDirectoryRemoval(entry);
     throw new PhysicalRecoveryRequired("The interrupted folder action needs ownership recovery.");
   });
 }
