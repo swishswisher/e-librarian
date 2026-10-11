@@ -122,6 +122,22 @@ export async function journaledCreateFolder(owner: string, destination: string) 
     return entry;
   });
 }
+async function cleanupCompletedDirectoryRemoval(entry: Journal) {
+  const capture = entry.directoryCapture;
+  if (!capture || !usablePhysicalIdentity(entry.identity))
+    throw new PhysicalRecoveryRequired("The completed folder capture needs cleanup inspection.");
+  const remaining = await statOrAbsent(capture.directory);
+  if (remaining) {
+    if (!remaining.isDirectory() || remaining.isSymbolicLink() || !samePhysicalIdentity(remaining, capture) || (await readdir(capture.directory)).length)
+      throw new PhysicalRecoveryRequired("The completed folder capture needs cleanup inspection.");
+    // COMPLETED proves the approved folder was removed. Only its exact empty
+    // private container may be cleaned; never revisit the public folder name.
+    await rmdir(capture.directory);
+  }
+  // Also finish a replay interrupted after rmdir but before the parent sync.
+  await syncDirectory(path.dirname(entry.destination));
+  return entry;
+}
 async function finishDirectoryRemoval(entry: Journal) {
   const capture = entry.directoryCapture;
   const container = capture ? await statOrAbsent(capture.directory) : null;
@@ -140,11 +156,7 @@ async function finishDirectoryRemoval(entry: Journal) {
     throw new PhysicalRecoveryRequired("The interrupted folder capture has no verified removal proof.");
   }
   entry.state = "COMPLETED"; await writeLocalJson(journalPath(entry.owner), entry);
-  const remaining = await statOrAbsent(capture.directory);
-  if (!remaining?.isDirectory() || remaining.isSymbolicLink() || !samePhysicalIdentity(remaining, capture) || (await readdir(capture.directory)).length)
-    throw new PhysicalRecoveryRequired("The completed folder capture needs cleanup inspection.");
-  await rmdir(capture.directory); await syncDirectory(path.dirname(entry.destination));
-  return entry;
+  return cleanupCompletedDirectoryRemoval(entry);
 }
 export async function journaledRemoveFolder(owner: string, originalOwner: string, target: string,
   afterCaptureIntent?: () => Promise<void>, afterCaptured?: () => Promise<void>) {
@@ -152,7 +164,7 @@ export async function journaledRemoveFolder(owner: string, originalOwner: string
     const existing = await load(owner);
     if (existing && (existing.kind !== "REMOVE_FOLDER" || existing.source !== target || existing.destination !== target || existing.originalOwner !== originalOwner))
       throw new PhysicalRecoveryRequired("Folder removal journal authority changed.");
-    if (existing?.state === "COMPLETED") return existing;
+    if (existing?.state === "COMPLETED") return existing.directoryCapture ? cleanupCompletedDirectoryRemoval(existing) : existing;
     if (existing?.directoryCapture) return finishDirectoryRemoval(existing);
     const original = await load(originalOwner), stats = await statOrAbsent(target);
     if (!original?.created || original.state !== "COMPLETED" || original.kind !== "CREATE_FOLDER" || original.destination !== target ||
@@ -191,7 +203,8 @@ export async function recoverPhysicalAction(owner: string, expected?: PhysicalAc
         (expected.kind === "MOVE" && (!expected.checksum || entry.identity?.checksum !== expected.checksum)) ||
         (expected.kind === "REMOVE_FOLDER" && entry.originalOwner !== expected.originalOwner)))
       throw new PhysicalRecoveryRequired("Historical physical journal authority does not match this action.");
-    if (!entry || entry.state === "COMPLETED") return entry;
+    if (!entry) return entry;
+    if (entry.state === "COMPLETED") return entry.kind === "REMOVE_FOLDER" && entry.directoryCapture ? cleanupCompletedDirectoryRemoval(entry) : entry;
     if (entry.kind === "MOVE") return recoverMove(entry, false);
     if (entry.kind === "REMOVE_FOLDER" && entry.directoryCapture) return finishDirectoryRemoval(entry);
     throw new PhysicalRecoveryRequired("The interrupted folder action needs ownership recovery.");

@@ -73,6 +73,10 @@ the public name into an owned private directory before removal, verifies the
 captured identity and emptiness, and journals that verified phase. A raced
 unrelated capture remains intact and unresolved. INTENT plus absent public
 names cannot prove removal. Historical completed records remain readable.
+Completed removals with captured ownership retain cleanup eligibility: both
+recovery entry points may remove only the exact empty private container and
+finish its parent synchronization. Replays never remove a new public directory
+or repeat the completed inner removal; unsafe or nonempty captures are preserved.
 
 **FILE-3.** Keep physical copies available for root authorization/discovery. Collapse byte-identical semantic copies only after complete effective typed/version metadata agrees. Copies are not independent corroboration or contradictory revisions. Complete-family ambiguity fails closed before bounded source selection.
 

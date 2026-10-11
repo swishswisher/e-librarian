@@ -478,3 +478,17 @@ all three closure boundaries retain their complete production-path gates.
 Final validation, patch/blob manifest and local commit identity are recorded
 externally. Mac physical and staging acceptance remain separate, unexecuted
 gates; this change neither activates scheduling nor publishes a Bridge release.
+
+### Completed folder capture cleanup closure
+
+PR #3 finding 4242735793 exposed a crash between durable REMOVE_FOLDER
+COMPLETED and private-container cleanup. Actual owned-process termination at
+that boundary on `e8bfc06d4d411acdf6e729130c7e98722e134b01` left the verified
+empty capture stranded through both recovery entry points. Completed captured
+removals now retry only exact BigInt-owned, directory-typed, empty-container
+cleanup under the existing journal lock. Absent captures replay idempotently
+and finish parent synchronization; public paths and completed journal history
+are unchanged. Replaced, nonempty, corrupt and unsafe captures fail closed.
+Permanent real-filesystem regressions cover both entry points, process death
+before cleanup and after cleanup before synchronization, concurrent replay,
+new public contents and retained historical proof. No migration is required.
