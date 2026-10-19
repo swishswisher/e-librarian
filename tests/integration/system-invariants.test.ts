@@ -9,6 +9,18 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import { knowledgeScaleFixture } from "./knowledge-scale-fixtures";
 import { createBridgeDeviceId, createBridgeKeyPair, createBridgeDeviceRequestHeaders } from "../../packages/bridge-protocol/src";
 
+// Synthetic reports must preserve the same total/partition integrity that the
+// native scanner signs over. Never downgrade production validation for tests.
+function nativeInventoryFixture<T extends { readStatus: string }>(files: T[]) {
+  return {
+    files,
+    totalFiles: files.length,
+    supportedFiles: files.filter((file) => file.readStatus === "SUPPORTED").length,
+    unsupportedFiles: files.filter((file) => file.readStatus === "UNSUPPORTED").length,
+    failedFiles: files.filter((file) => file.readStatus === "FAILED").length,
+  };
+}
+
 const schema = `system_invariants_${process.pid}_${Date.now()}`;
 let prisma: PrismaClient;
 let reviews: typeof import("../../src/lib/library/observation-sessions");
@@ -648,7 +660,7 @@ test("RECOVER-2 partial remote scan retries complete every chunk and terminal re
     checksum: createHash("sha256").update(`synthetic-${index}`).digest("hex"), fileType: "TEXT", readStatus: "SUPPORTED" }));
   const input = { bridgeDeviceId: device.bridgeDeviceId, bridgeRootId: data.root.bridgeRootId!, connectedLibraryId: data.root.id,
     commandPayload: { scanSessionId: data.scan.id }, report: { commandId: "synthetic-report", status: "COMPLETED" as const,
-      completedAt: new Date().toISOString(), safeErrorCategory: null, result: { files } } };
+      completedAt: new Date().toISOString(), safeErrorCategory: null, result: nativeInventoryFixture(files) } };
   await prisma.$executeRawUnsafe(`CREATE FUNCTION fail_import_chunk() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."relativePath" = 'file-0500.txt' THEN RAISE EXCEPTION 'injected chunk failure'; END IF; RETURN NEW; END $$`);
   await prisma.$executeRawUnsafe(`CREATE TRIGGER fail_import_chunk BEFORE INSERT ON "ScannedFile" FOR EACH ROW EXECUTE FUNCTION fail_import_chunk()`);
   t.after(async () => { await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS fail_import_chunk ON "ScannedFile"'); await prisma.$executeRawUnsafe("DROP FUNCTION IF EXISTS fail_import_chunk()"); });
@@ -1269,7 +1281,7 @@ test("CURRENT-1 watch deletion hints reconcile a full inventory and preserve unc
     fileType: "TEXT", readStatus: "FAILED", sizeBytes: null, lastModified: null, sourceCreatedAt: null, scanError: "Synthetic temporarily unavailable source" }));
   await reads.importRemoteBridgeScanReport({ bridgeDeviceId: f.device.bridgeDeviceId, bridgeRootId: f.root.bridgeRootId!, connectedLibraryId: f.root.id,
     commandPayload: command.payload, report: { commandId: command.commandId, status: "COMPLETED",
-      completedAt: new Date().toISOString(), result: { files } } });
+      completedAt: new Date().toISOString(), result: nativeInventoryFixture(files) } });
   assert.equal(await prisma.scannedFile.count({ where: { sessionId: batch.scanSessionId! } }), 2, "A change to one file retains the full current inventory");
   await f.monitor.recoverMonitoringBatchesForDevice(f.device.bridgeDeviceId);
   const current = await prisma.monitoringBatch.findUniqueOrThrow({ where: { id: batch.id } });
@@ -1303,7 +1315,7 @@ test("CURRENT-2 scan import from an older connection cannot publish current inve
   const payload = command.payload as Record<string, string>;
   await assert.rejects(reads.importRemoteBridgeScanReport({ bridgeDeviceId: f.device.bridgeDeviceId, bridgeRootId: f.root.bridgeRootId!,
     connectedLibraryId: f.root.id, commandPayload: command.payload, expectedRootRevision: 0,
-    report: { commandId: command.commandId, status: "COMPLETED", completedAt: new Date().toISOString(), result: { files: [] } } }), /older root or device authority/);
+    report: { commandId: command.commandId, status: "COMPLETED", completedAt: new Date().toISOString(), result: nativeInventoryFixture([]) } }), /older root or device authority/);
   assert.equal(await prisma.scannedFile.count({ where: { sessionId: payload.scanSessionId } }), 0);
   assert.equal((await prisma.scanSession.findUniqueOrThrow({ where: { id: payload.scanSessionId } })).status, "SCANNING");
 });
@@ -1518,7 +1530,7 @@ test("CURRENT-1 post-move reconciliation rejects pre-move inventory, retries, an
   await f.remote.applyRemoteExecutionReport({ commandPayload: f.command.payload, report: { commandId: f.command.commandId, status: "COMPLETED", result: { actions: f.results } } });
   await assert.rejects(reads.importRemoteBridgeScanReport({ bridgeDeviceId: f.device.bridgeDeviceId, bridgeRootId: f.root.bridgeRootId!,
     connectedLibraryId: f.root.id, commandPayload: oldCommand.payload,
-    report: { commandId: oldCommand.commandId, status: "COMPLETED", result: { files: [] } } }), /preceded an authorized filesystem outcome/);
+    report: { commandId: oldCommand.commandId, status: "COMPLETED", result: nativeInventoryFixture([]) } }), /preceded an authorized filesystem outcome/);
   assert.equal((await prisma.scanSession.findUniqueOrThrow({ where: { id: oldScan.session.id } })).status, "FAILED");
   assert.equal((await prisma.bridgeCommand.findUniqueOrThrow({ where: { commandId: oldCommand.commandId } })).status, "CANCELLED");
   await reconcile.recoverExecutionReconciliations({ bridgeDeviceId: f.device.bridgeDeviceId });
