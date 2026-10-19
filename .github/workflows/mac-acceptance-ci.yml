@@ -72,3 +72,33 @@ jobs:
       - run: npm run test:invariants
       - run: npm run build:bridge
       - run: npm run build:web
+
+  mac-native-sweep:
+    name: Intel Mac synthetic filesystem & Bridge packaging (no deploy)
+    runs-on: macos-15-intel
+    timeout-minutes: 40
+    env:
+      OPENAI_API_KEY: ''
+      ANTHROPIC_API_KEY: ''
+      NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS: '1'
+      NSN_LIBRARIAN_APP_URL: http://127.0.0.1:3000
+      NSN_BRIDGE_ARCH: x64
+      NSN_UNSIGNED_BUILD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+      - name: Run read-only and explicitly synthetic native acceptance
+        run: node --import tsx --test --test-concurrency=1 bridge-app/tests/mac-acceptance-sweep.test.ts
+      - name: Typecheck Bridge
+        run: npm run build:bridge
+      - name: Package unsigned local-only Intel test DMG
+        run: npm run package:bridge:mac
+      - name: Verify unsigned test artifact without uploading/publishing it
+        run: |
+          test -f apps/bridge/dist/release/latest-mac.json
+          node -e 'const m=require("./apps/bridge/dist/release/latest-mac.json"); if(m.signed || m.channel!=="development" || m.files.length!==1 || !m.files[0].includes("mac-x64")) process.exit(1);'
