@@ -37,6 +37,11 @@ export function effectiveBridgeHealth(
   devices: BridgeDeviceSummary[],
   now = new Date(),
 ): LocalBridgeHealth {
+  // An explicitly unpaired local Bridge must not be overwritten by an
+  // unrelated/stale cloud device heartbeat claiming that this Mac is ready.
+  if (localBridgeHealth.status === "BRIDGE_NOT_PAIRED") {
+    return localBridgeHealth;
+  }
   return localBridgeHealth.ok
     ? localBridgeHealth
     : cloudBridgeHealth(devices, now);
