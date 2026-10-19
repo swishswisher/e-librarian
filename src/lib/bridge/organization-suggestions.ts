@@ -1719,6 +1719,26 @@ export function sourceLocationsForRecommendation(contentText: string, concepts: 
     .map((excerpt) => `Source location: characters ${excerpt.start}-${excerpt.end} of extracted text.`);
 }
 
+// Broad subject labels do not justify erasing an established folder or client
+// hierarchy. Explicit human-approved destination preferences remain authoritative.
+// An unstructured Inbox/Downloads collection is allowed to receive cautious
+// filing suggestions, but a named client/project/archive is preserved by default.
+const stagingFolderPattern = /^(?:\d{1,3}[-_ ]+)?(?:inbox|mixed[-_ ]inbox|downloads|unsorted|loose|incoming|to[-_ ]sort|queue)$/iu;
+export function suppressBroadCategoryMove(
+  sourceRelativePath: string,
+  destinationFolder: string,
+  hasApprovedDestinationPreference = false,
+) {
+  if (hasApprovedDestinationPreference) return false;
+  const destinationParts = destinationFolder.split("/").filter(Boolean);
+  if (destinationParts.length !== 1) return false;
+  const sourceFolders = sourceRelativePath.replaceAll("\\", "/").split("/").filter(Boolean).slice(0, -1);
+  if (!sourceFolders.length) return false;
+  // A hierarchy is treated as unstructured only when *every* folder in the
+  // chain is a staging bucket, never when a named client/project contains one.
+  return !sourceFolders.every((folder) => stagingFolderPattern.test(folder.trim()));
+}
+
 function moveAndFolderDrafts(context: SuggestionContext) {
   const best = bestRuleFor(context);
 
@@ -1755,11 +1775,11 @@ function moveAndFolderDrafts(context: SuggestionContext) {
   const currentFolder = folderFromRelativePath(context.currentRelativePath);
   // Topic affinity alone cannot justify flattening an established multi-level
   // client/project hierarchy into a broad single category folder.
-  const currentDepth = currentFolder.split("/").filter(Boolean).length;
-  const destinationDepth = destinationFolder.split("/").filter(Boolean).length;
-  if (currentDepth >= 3 && destinationDepth < currentDepth && !approvedPreference) {
-    return [];
-  }
+  if (suppressBroadCategoryMove(
+    context.currentRelativePath,
+    destinationFolder,
+    Boolean(approvedPreference),
+  )) return [];
   const proposedRelativePath = joinRelativePath(destinationFolder, context.fileName);
   const drafts: SuggestionDraft[] = [];
   const matchedConcepts = best.directMatches.join(", ");
@@ -1812,12 +1832,15 @@ function moveAndFolderDrafts(context: SuggestionContext) {
   if (normalizeText(currentFolder) !== normalizeText(destinationFolder)) {
     drafts.push(
       makeDraft(context, {
-        confidence:
-          0.68 +
-          Math.min(best.directMatches.length, 4) * 0.02 +
-          (establishedFolder ? 0.04 : 0) +
-          (clusterSupport ? 0.04 : 0),
-        evidenceStrength: "STRONG",
+        confidence: destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+          ? 0.66 // Topic evidence is not independent proof of destination authority.
+          : 0.68 +
+            Math.min(best.directMatches.length, 4) * 0.02 +
+            (establishedFolder ? 0.04 : 0) +
+            (clusterSupport ? 0.04 : 0),
+        evidenceStrength: destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+          ? "SUPPORTED"
+          : "STRONG",
         explanation: `The readable or reviewed content includes the related concepts ${matchedConcepts}. ${folderEvidence} Together, that evidence supports reviewing ${destinationFolder} as a destination.`,
         proposedRelativePath,
         suggestionType: "MOVE_FILE",

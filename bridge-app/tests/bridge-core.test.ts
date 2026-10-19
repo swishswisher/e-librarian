@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -654,6 +654,34 @@ describe("NSN Bridge core", () => {
         error instanceof BridgeAppError &&
         error.code === "VIDEO_DECODE_FAILED",
     );
+  });
+
+  it("rejects an unavailable native root instead of importing a false empty inventory", async () => {
+    const folder = await makeSafeFolder("library-removed-root");
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "worksheet.txt"), "Synthetic clinical worksheet.");
+    await rm(folder, { recursive: true, force: true });
+    await assert.rejects(() => scanBridgeRoot(root.id),
+      (error) => error instanceof BridgeAppError && error.code === "ROOT_UNAVAILABLE");
+  });
+
+  it("rejects a replaced root during native inventory without adopting replacement files", async () => {
+    const folder = await makeSafeFolder("library-root-replacement");
+    const root = await connectFolder(folder);
+    const preserved = `${folder}-preserved`;
+    await writeFile(path.join(folder, "source.png"), pngMetadataFixture());
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async () => {
+          await rename(folder, preserved);
+          await mkdir(folder);
+          await writeFile(path.join(folder, "replacement.txt"), "An unrelated synthetic file.");
+        },
+      }),
+      (error) => error instanceof BridgeAppError && error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+    assert.equal(await readFile(path.join(preserved, "source.png")).then(b => b.length), pngMetadataFixture().length);
+    await rm(preserved, { recursive: true, force: true });
   });
 
   it("scans a single supported .txt file and distinguishes genuinely empty roots", async () => {
