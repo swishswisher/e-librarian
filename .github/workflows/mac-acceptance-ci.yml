@@ -1,6 +1,9 @@
 name: Mac acceptance remediation checks
 
 on:
+  push:
+    branches:
+      - fix/mac-acceptance-issues-4-12
   pull_request:
     branches:
       - release-candidate/phase-1-3
