@@ -525,31 +525,10 @@ export function OrganizationSuggestionsReviewPanel({
           return true;
         }
 
+        // The field is explicitly labeled "Search by file name or path".
+        // Never match other files mentioned only in evidence or alternatives.
         return [
-          suggestion.title,
           suggestion.currentRelativePath,
-          suggestion.proposedRelativePath,
-          suggestion.proposedFileName,
-          suggestion.explanation,
-          suggestion.whySuggested.join(" "),
-          suggestion.supportingInformation.join(" "),
-          suggestion.alternatives
-            .flatMap((alternative) => [
-              alternative.title,
-              alternative.proposedRelativePath,
-              alternative.proposedFileName,
-              alternative.explanation,
-            ])
-            .filter(Boolean)
-            .join(" "),
-          suggestion.duplicateEvidence
-            .flatMap((match) => [
-              match.connectedLibraryName,
-              match.relativePath,
-              ...match.signals,
-            ])
-            .join(" "),
-          libraryNameBySuggestionId[suggestion.id],
         ]
           .filter(Boolean)
           .join(" ")
