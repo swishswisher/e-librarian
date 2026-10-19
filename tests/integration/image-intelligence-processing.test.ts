@@ -580,6 +580,26 @@ test("an established Clinical Tools folder can still receive cautious inbox sugg
     "Recommendations must never change the original files.");
 });
 
+test("an established Clinical Tools folder belonging to a different client cannot attract inbox files", async () => {
+  const files = new Map([
+    ["00_EXISTING_ARCHIVE/Solace_Lantern_Learning/Clinical Tools/session-guide.md",
+      "A clinical practice worksheet with client exercises and reflective learning in a named archive."],
+    ["00_EXISTING_ARCHIVE/Solace_Lantern_Learning/Clinical Tools/learning-template.md",
+      "A clinical practice template for client exercises and reflective worksheet sessions."],
+    ["01_MIXED_INBOX/Downloads/anonymous-worksheet.txt",
+      "A clinical practice worksheet and client exercise, without a verified link to Solace Lantern Learning."],
+  ]);
+  const { libraryRoot, sessionId } = await createBridgeBackedTextLibrary(files);
+  const originals = await listRelativeFiles(libraryRoot);
+  await processBridgeScanSession(sessionId, { recordNotebook: false });
+  const source = await storedFile(sessionId, "01_MIXED_INBOX/Downloads/anonymous-worksheet.txt");
+  assert.equal(source.organizationSuggestions.some(s =>
+    s.invalidatedAt === null && ["MOVE_FILE", "GROUP_WITH_FILES"].includes(s.suggestionType) &&
+    s.proposedRelativePath?.startsWith("00_EXISTING_ARCHIVE/Solace_Lantern_Learning/")), false,
+    "Destination topic overlap cannot establish a different organization's ownership.");
+  assert.deepEqual(await listRelativeFiles(libraryRoot), originals);
+});
+
 test("explicit regeneration revisits terminal files that no longer have current recommendations", async () => {
   const relativePath = "Archive/LetterFromMara.txt";
   const originalText =

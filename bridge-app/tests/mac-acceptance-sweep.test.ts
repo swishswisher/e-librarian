@@ -23,7 +23,7 @@ import { saveBridgeSecret } from "../../apps/bridge/src/main/keychain";
 import { processPendingBridgeCommands } from "../../apps/bridge/src/main/command-runner";
 import { setBridgeCloudFetchForTests } from "../../apps/bridge/src/main/cloud-client";
 
-import { suppressBroadCategoryMove } from "../../src/lib/bridge/organization-suggestions";
+import { crossesNamedOrganizationBoundary, suppressBroadCategoryMove } from "../../src/lib/bridge/organization-suggestions";
 import { reconcileRecommendationDrafts, type RecommendationDraft } from "../../src/lib/bridge/recommendation-reconciliation";
 
 // All paths are disposable and outside iCloud/Documents. No private source,
@@ -78,6 +78,15 @@ test("#6 a corrupt seven-byte UTF-8 file fails promptly and never blocks the nex
 });
 
 test("#8 client archives resist broad Clinical Tools grouping and renaming cannot inflate move confidence", () => {
+  assert.equal(crossesNamedOrganizationBoundary(
+    "01_MIXED_INBOX/Downloads/worksheet.txt",
+    "00_EXISTING_ARCHIVE/Solace_Lantern_Learning/Clinical Tools"), true);
+  assert.equal(crossesNamedOrganizationBoundary(
+    "00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Restorative_Practices/worksheet.md",
+    "00_EXISTING_ARCHIVE/Juniper_Kite_Collective/Clinical Tools"), true);
+  assert.equal(crossesNamedOrganizationBoundary(
+    "00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Restorative_Practices/worksheet.md",
+    "00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Clinical Tools"), false);
   const archive = "00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Restorative_Practices/RPR_03_Participant_worksheet.md";
   const dialogue = "08_DEEP_ARCHIVES/HFA/Dialogue_Samples/RPR_Session_1.txt";
   for (const item of [archive, dialogue]) {

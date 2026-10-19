@@ -1739,6 +1739,16 @@ export function suppressBroadCategoryMove(
   return !sourceFolders.every((folder) => stagingFolderPattern.test(folder.trim()));
 }
 
+// A nested destination is a real client/project scope, not merely a topic.
+// Shared clinical vocabulary cannot justify crossing either named ancestor.
+export function crossesNamedOrganizationBoundary(sourceRelativePath: string, destinationFolder: string) {
+  const source = sourceRelativePath.replaceAll("\\", "/").split("/").filter(Boolean).slice(0, -1);
+  const destination = destinationFolder.replaceAll("\\", "/").split("/").filter(Boolean);
+  if (destination.length < 2) return false;
+  return source[0] !== destination[0] ||
+    (source.length >= 2 && source[1] !== destination[1]);
+}
+
 function moveAndFolderDrafts(context: SuggestionContext) {
   const best = bestRuleFor(context);
 
@@ -1779,8 +1789,14 @@ function moveAndFolderDrafts(context: SuggestionContext) {
   if (best.rule.id === "clinical-tools" && !establishedFolder && !approvedPreference) {
     return [];
   }
-  // Topic affinity alone cannot justify flattening an established multi-level
-  // client/project hierarchy into a broad single category folder.
+  // Preserve scope and depth: shared subjects are not specific destination
+  // evidence for an unrelated client or a flattened established archive.
+  const sourceFolderCount = context.currentRelativePath.split("/").filter(Boolean).length - 1;
+  const destinationFolderCount = destinationFolder.split("/").filter(Boolean).length;
+  if (!approvedPreference && (
+    crossesNamedOrganizationBoundary(context.currentRelativePath, destinationFolder) ||
+    (sourceFolderCount >= 3 && destinationFolderCount < sourceFolderCount)
+  )) return [];
   if (suppressBroadCategoryMove(
     context.currentRelativePath,
     destinationFolder,
