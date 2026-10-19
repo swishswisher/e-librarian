@@ -51,6 +51,29 @@ import {
 } from "./command-outbox";
 import { readBridgeSecret, saveBridgeSecret } from "./keychain";
 
+const temporaryReadDeadlineMs = 90_000;
+// Only temporary reads have a deadline. Execution and Undo instead use
+// durable physical journals and never time out into speculative retries.
+// Late read completion cannot replace the already settled command report.
+export function withBoundedTemporaryRead<T>(
+  task: Promise<T>,
+  deadlineMs = temporaryReadDeadlineMs,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new BridgeAppError(
+        "The temporary read exceeded its safe deadline.",
+        "READ_COMMAND_TIMEOUT",
+        504,
+      ));
+    }, deadlineMs);
+    task.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 const replayCacheSecret = "processed-command-replay-keys";
 const replayCacheLimit = 500;
 const privatePathKeys = new Set(["actualPath", "localPath", "rootPath"]);
@@ -313,10 +336,10 @@ async function executeCommand(
     case "STOP_WATCHING":
       return stopBridgeWatcher(requiredRootId(command));
     case "READ_FILE_TEMPORARILY":
-      return readBridgeRootFile(
+      return withBoundedTemporaryRead(readBridgeRootFile(
         requiredRootId(command),
         typeof payload.relativePath === "string" ? payload.relativePath : "",
-      );
+      ));
     case "PREVIEW_EXECUTION":
       return previewBridgeExecution(
         requiredRootId(command),

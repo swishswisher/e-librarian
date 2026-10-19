@@ -653,11 +653,7 @@ export function ConnectedLibrariesManager({
         return;
       }
 
-      setBridgeHealth((current) => ({
-        ...current,
-        ok: true,
-        status: "FOLDER_SELECTION_IN_PROGRESS",
-      }));
+      // Local folder-picker success is not evidence of cloud pairing.
       const existingLibrary = payload.existingLibrary ?? null;
       const selection = {
         ...payload.selection,
