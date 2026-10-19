@@ -1753,6 +1753,13 @@ function moveAndFolderDrafts(context: SuggestionContext) {
       (best.rule.id === "workshops" && relationship.relationshipKind === "SAME_WORKSHOP"))
     .slice(0, 2);
   const currentFolder = folderFromRelativePath(context.currentRelativePath);
+  // Topic affinity alone cannot justify flattening an established multi-level
+  // client/project hierarchy into a broad single category folder.
+  const currentDepth = currentFolder.split("/").filter(Boolean).length;
+  const destinationDepth = destinationFolder.split("/").filter(Boolean).length;
+  if (currentDepth >= 3 && destinationDepth < currentDepth && !approvedPreference) {
+    return [];
+  }
   const proposedRelativePath = joinRelativePath(destinationFolder, context.fileName);
   const drafts: SuggestionDraft[] = [];
   const matchedConcepts = best.directMatches.join(", ");
@@ -1948,6 +1955,15 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     ];
 
     if (!folder || overlap.length === 0 || normalizeText(folder) === currentFolder) {
+      continue;
+    }
+
+    // Separate named client/project branches must not be proposed as
+    // destinations merely because their files share clinical vocabulary.
+    const sourceScope = context.currentRelativePath.split("/").filter(Boolean);
+    const targetScope = folder.split("/").filter(Boolean);
+    if (sourceScope.length >= 3 && targetScope.length >= 2 &&
+        (sourceScope[0] !== targetScope[0] || sourceScope[1] !== targetScope[1])) {
       continue;
     }
 
