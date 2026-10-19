@@ -17,6 +17,11 @@ on:
       - 'package*.json'
       - '.github/workflows/mac-acceptance-ci.yml'
 
+# Keep the isolated acceptance gate on the newest repair head only.
+concurrency:
+  group: mac-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
