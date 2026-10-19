@@ -130,7 +130,7 @@ test("#11 exact authorized synthetic execution and Undo restore the complete tre
   assert.equal(restored.status, "COMPLETED");
   assert.equal(restored.completedActions, 2);
   assert.equal((await stat(path.join(f.folder, "worksheet.txt"))).isFile(), true);
-  assert.equal(createHash("sha256").update(await readFile(path.join(f.folder, "worksheet.txt")).digest("hex"), checksum);
+  assert.equal(createHash("sha256").update(await readFile(path.join(f.folder, "worksheet.txt"))).digest("hex"), checksum);
   assert.deepEqual(await readdir(f.folder), ["worksheet.txt"]);
   assert.equal(await inspectUndoFolderName(f.folder, "Filed"), "ABSENT");
 
