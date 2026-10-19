@@ -235,6 +235,26 @@ function scanResultFromReport(
   ).length;
   const failedFiles = files.filter((file) => file.readStatus === "FAILED").length;
 
+  // Native Bridge includes independently counted inventory totals. Never
+  // silently reinterpret a shortened, corrupted or partially serialized
+  // report as a genuine empty folder. An actual empty folder has four zeros.
+  if (
+    !Number.isSafeInteger(candidate.totalFiles) ||
+    !Number.isSafeInteger(candidate.supportedFiles) ||
+    !Number.isSafeInteger(candidate.unsupportedFiles) ||
+    !Number.isSafeInteger(candidate.failedFiles) ||
+    candidate.totalFiles !== files.length ||
+    candidate.supportedFiles !== supportedFiles ||
+    candidate.unsupportedFiles !== unsupportedFiles ||
+    candidate.failedFiles !== failedFiles
+  ) {
+    throw new BridgeCloudError(
+      "The Bridge scan report totals disagree with its inventory.",
+      422,
+      "INVALID_SCAN_INVENTORY",
+    );
+  }
+
   return {
     bridgeRootId,
     completedAt: dateValue(candidate.completedAt) ?? new Date(),
