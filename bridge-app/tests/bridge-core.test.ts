@@ -595,6 +595,20 @@ describe("NSN Bridge core", () => {
     assert.equal(video.videoMetadata?.transcriptSnippet, null);
   });
 
+  it("rejects seven-byte malformed UTF-8 without inventing replacement text", async () => {
+    const folder = await makeSafeFolder("library-bad-utf8");
+    const root = await connectFolder(folder);
+    // Deliberately invalid UTF-8 followed by ASCII. The read must fail promptly.
+    await writeFile(path.join(folder, "garbled_utf8.txt"), Buffer.from([0xff, 0xfe, 0xc0, 0x80, 0xf5, 0x61, 0x62]));
+    await assert.rejects(
+      () => readBridgeRootFile(root.id, "garbled_utf8.txt"),
+      (error) => error instanceof BridgeAppError && error.code === "FILE_INVALID_ENCODING",
+    );
+    await writeFile(path.join(folder, "valid.txt"), "A valid follow-up document.");
+    const valid = await readBridgeRootFile(root.id, "valid.txt");
+    assert.equal(valid.extractedText, "A valid follow-up document.");
+  });
+
   it("caps long temporary document text and reports partial analysis", async () => {
     const folder = await makeSafeFolder("library-long-document");
     const root = await connectFolder(folder);
