@@ -223,7 +223,12 @@ async function scanDirectory(
   const currentStats = await lstat(currentPath);
 
   if (!currentStats.isDirectory() || currentStats.isSymbolicLink()) {
-    return;
+    // A changed/disconnected root is not a legitimately empty library.
+    throw new BridgeAppError(
+      "The folder changed while the Bridge was scanning it.",
+      "SCAN_INVENTORY_UNVERIFIED",
+      409,
+    );
   }
 
   const entries = await readdir(currentPath, { withFileTypes: true });
@@ -306,6 +311,14 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
   const root = await requireRootPermission(rootId, "readPermission", "scan files");
   const startedAt = new Date();
   const files: BridgeScannedFileDraft[] = [];
+  const rootBefore = await lstat(root.actualPath, { bigint: true }).catch(() => null);
+  if (!rootBefore?.isDirectory() || rootBefore.isSymbolicLink()) {
+    throw new BridgeAppError(
+      "The connected folder is missing or is no longer a regular directory.",
+      "ROOT_UNAVAILABLE",
+      422,
+    );
+  }
 
   if (!isPathInsideRoot(path.dirname(root.actualPath), root.actualPath)) {
     throw new BridgeAppError(
@@ -323,6 +336,17 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
     options.imageMetadataExtractor ?? extractImageMetadata,
     options.beforeImageChecksum,
   );
+
+  const rootAfter = await lstat(root.actualPath, { bigint: true }).catch(() => null);
+  if (!rootAfter?.isDirectory() || rootAfter.isSymbolicLink() ||
+      rootBefore.dev !== rootAfter.dev || rootBefore.ino !== rootAfter.ino ||
+      rootBefore.mtimeNs !== rootAfter.mtimeNs || rootBefore.ctimeNs !== rootAfter.ctimeNs) {
+    throw new BridgeAppError(
+      "The connected folder changed while the inventory was being verified.",
+      "SCAN_INVENTORY_UNVERIFIED",
+      409,
+    );
+  }
 
   const publishedPaths = new Set(files.map((file) => file.relativePath));
   const verifiedPaths = new Set<string>();
