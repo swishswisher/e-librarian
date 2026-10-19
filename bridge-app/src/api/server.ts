@@ -469,7 +469,7 @@ async function handleAuthenticatedRequest(
   );
 }
 
-export function createBridgeServer() {
+export function createBridgeServer(options: { isCloudPaired?: () => Promise<boolean> } = {}) {
   return createServer((request, response) => {
     void (async () => {
       applyCors(request, response);
@@ -488,11 +488,16 @@ export function createBridgeServer() {
       validateOrigin(request);
 
       if (request.method === "GET" && requestUrl.pathname === "/bridge/v1/health") {
+        // A running loopback server and a local pairing secret do not attest
+        // cloud device pairing. Never default to paired on an unpaired Bridge.
+        const paired = options.isCloudPaired
+          ? await options.isCloudPaired().catch(() => false)
+          : false;
         sendJson(request, response, 200, {
           ok: true,
-          paired: true,
+          paired,
           platform: process.platform,
-          status: "BRIDGE_READY",
+          status: paired ? "BRIDGE_READY" : "BRIDGE_NOT_PAIRED",
           version: bridgeVersion,
         });
         return;
