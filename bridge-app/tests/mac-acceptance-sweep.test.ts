@@ -18,6 +18,11 @@ import { recoverPhysicalAction } from "../src/filesystem/physical-journal";
 import { BridgeAppError, type BridgeExecutionPlanAction, type BridgeUndoPlanAction } from "../src/types";
 import { createFolderSelection, registerRootFromSelection } from "../src/main/registry";
 import { withBoundedTemporaryRead } from "../../apps/bridge/src/main/command-runner";
+import { createBridgeDeviceId, createBridgeKeyPair, createBridgeCommandEnvelope } from "../../packages/bridge-protocol/src";
+import { saveBridgeSecret } from "../../apps/bridge/src/main/keychain";
+import { processPendingBridgeCommands } from "../../apps/bridge/src/main/command-runner";
+import { setBridgeCloudFetchForTests } from "../../apps/bridge/src/main/cloud-client";
+
 import { suppressBroadCategoryMove } from "../../src/lib/bridge/organization-suggestions";
 import { reconcileRecommendationDrafts, type RecommendationDraft } from "../../src/lib/bridge/recommendation-reconciliation";
 
@@ -152,4 +157,59 @@ test("#12 the Mac native scanner distinguishes one eligible file from a truly em
   assert.deepEqual(full.files.map(x => x.relativePath), ["synthetic_client_worksheet.txt"]);
   assert.match(full.files[0]!.checksum ?? "", /^[a-f0-9]{64}$/);
   assert.equal(full.files[0]!.readStatus, "SUPPORTED");
+});
+
+test("#6/#12 signed command runner submits a real one-file scan then reports malformed and valid reads in order", async (t) => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.folder, "garbled_utf8.txt"), Buffer.from([0x48, 0x65, 0xff, 0xfe, 0x78, 0x00, 0x0a]));
+  await writeFile(path.join(f.folder, "valid.txt"), "A valid synthetic follow-up.");
+  const deviceId = createBridgeDeviceId();
+  const keys = createBridgeKeyPair();
+  await saveBridgeSecret("bridge-device-id", deviceId);
+  await saveBridgeSecret("device-private-key", keys.privateKey);
+  const newCommand = (commandType: "SCAN_LIBRARY" | "READ_FILE_TEMPORARILY", suffix: string, payload: Record<string,string>) =>
+    createBridgeCommandEnvelope({
+      bridgeDeviceId: deviceId, bridgeRootId: f.rootId, commandType,
+      signingSecret: "synthetic-acceptance-command-signing-key",
+      authorizationContext: { rootConnectionRevision: f.revision },
+      idempotencyKey: `acceptance-${suffix}`, payload,
+    });
+  const commands = [
+    newCommand("SCAN_LIBRARY", "inventory", { scanSessionId: "synthetic-scan" }),
+    newCommand("READ_FILE_TEMPORARILY", "corrupt", { relativePath: "garbled_utf8.txt" }),
+    newCommand("READ_FILE_TEMPORARILY", "valid", { relativePath: "valid.txt" }),
+  ];
+  const reported: Array<Record<string, unknown>> = [];
+  setBridgeCloudFetchForTests(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/commands") && init?.method === "GET")
+      return Response.json({ ok: true, commands });
+    if (url.endsWith("/acknowledge") && init?.method === "POST")
+      return Response.json({ ok: true });
+    if (url.endsWith("/complete") && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      reported.push(body);
+      return Response.json({ ok: true });
+    }
+    throw new Error("Unexpected synthetic command transport operation.");
+  });
+  try {
+    const started = Date.now();
+    const responses = await processPendingBridgeCommands();
+    assert.ok(Date.now() - started < 20_000, "Independently readable files must not wait for command expiry.");
+    assert.equal(responses.length, 3);
+    assert.equal(reported.length, 3);
+    assert.equal(responses[0]?.status, "COMPLETED");
+    const inventory = responses[0]?.result as { totalFiles?: number; supportedFiles?: number; files?: unknown[] } | null;
+    assert.equal(inventory?.totalFiles, 2);
+    assert.equal(inventory.supportedFiles, 2);
+    assert.equal(inventory.files?.length, 2);
+    assert.equal(responses[1]?.status, "FAILED");
+    assert.equal(responses[1]?.safeErrorCategory, "FILE_INVALID_ENCODING");
+    assert.equal(responses[2]?.status, "COMPLETED");
+    assert.equal((responses[2]?.result as { extractedText?: string } | null)?.extractedText,
+      "A valid synthetic follow-up.");
+  } finally {
+    setBridgeCloudFetchForTests();
+  }
 });
