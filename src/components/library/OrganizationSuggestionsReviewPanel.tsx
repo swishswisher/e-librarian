@@ -538,7 +538,6 @@ export function OrganizationSuggestionsReviewPanel({
     [
       activeFilter,
       libraryIdBySuggestionId,
-      libraryNameBySuggestionId,
       rows,
       searchQuery,
     ],
