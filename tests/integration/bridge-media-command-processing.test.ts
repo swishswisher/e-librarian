@@ -536,12 +536,17 @@ test("remote scanner refuses a truncated single-file report and accepts an exact
   assert.equal(await prisma.scannedFile.count({ where: { sessionId: session.id } }), 0);
 
   const accepted = await importRemoteBridgeScanReport(argumentsFor(genuineScan));
-  assert.equal(accepted?.totalFiles, 1);
+  assert.equal((accepted as { totalFiles?: number } | null)?.totalFiles, 1);
   assert.equal(await prisma.scannedFile.count({ where: { sessionId: session.id } }), 1);
+  const persisted = await (await import("../../src/lib/bridge/scan-sessions"))
+    .latestBridgeScanProgressByConnectedLibrary([root.library.id]);
+  assert.equal(persisted[root.library.id]?.sessionId, session.id);
+  assert.equal(persisted[root.library.id]?.filesDiscovered, 1);
+  assert.equal(persisted[root.library.id]?.currentStage, "READING");
 
   const repeated = await importRemoteBridgeScanReport(argumentsFor(genuineScan));
-  assert.equal(repeated?.alreadyImported, true);
-  assert.equal(repeated?.totalFiles, 1);
+  assert.equal((repeated as { alreadyImported?: boolean } | null)?.alreadyImported, true);
+  assert.equal((repeated as { totalFiles?: number } | null)?.totalFiles, 1);
   await assert.rejects(
     () => importRemoteBridgeScanReport(argumentsFor({
       ...genuineScan, files: [], supportedFiles: 0, totalFiles: 0,
