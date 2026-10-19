@@ -231,8 +231,7 @@ export function BridgeScanControl({
     if (
       !progress?.isActive ||
       isCreatingScan ||
-      isProcessingRequest ||
-      processingPaused
+      isProcessingRequest
     ) {
       return;
     }
@@ -250,6 +249,11 @@ export function BridgeScanControl({
 
         if (isTerminalStatus(nextProgress.currentStage)) {
           completeIfTerminal(nextProgress);
+          return;
+        }
+
+        // Continue observing background recovery while user-triggered processing is paused.
+        if (processingPaused) {
           return;
         }
 
