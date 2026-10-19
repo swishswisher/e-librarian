@@ -69,15 +69,6 @@ function evidenceStrengthRank(value: RecommendationEvidenceStrength) {
   return value === "STRONG" ? 3 : value === "SUPPORTED" ? 2 : 1;
 }
 
-function strongestEvidenceStrength(
-  left: RecommendationEvidenceStrength,
-  right: RecommendationEvidenceStrength,
-) {
-  return evidenceStrengthRank(left) >= evidenceStrengthRank(right)
-    ? left
-    : right;
-}
-
 function normalizedPathKey(value: string | null | undefined) {
   const normalized = path.posix
     .normalize((value ?? "").trim().replace(/\\/g, "/"))
