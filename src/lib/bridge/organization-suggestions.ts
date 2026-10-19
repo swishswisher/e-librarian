@@ -1723,7 +1723,7 @@ export function sourceLocationsForRecommendation(contentText: string, concepts: 
 // hierarchy. Explicit human-approved destination preferences remain authoritative.
 // An unstructured Inbox/Downloads collection is allowed to receive cautious
 // filing suggestions, but a named client/project/archive is preserved by default.
-const stagingFolderPattern = /^(?:\d{1,3}[-_ ]+)?(?:inbox|mixed[-_ ]inbox|downloads|unsorted|loose|incoming|to[-_ ]sort|queue)$/iu;
+const stagingFolderPattern = /^(?:\d{1,3}[-_ ]+)?(?:[\p{L}\d]+[-_ ]+)*(?:inbox|downloads|unsorted|mess|loose|incoming|to[-_ ]sort|queue)$/iu;
 export function suppressBroadCategoryMove(
   sourceRelativePath: string,
   destinationFolder: string,
@@ -1832,13 +1832,13 @@ function moveAndFolderDrafts(context: SuggestionContext) {
   if (normalizeText(currentFolder) !== normalizeText(destinationFolder)) {
     drafts.push(
       makeDraft(context, {
-        confidence: destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+        confidence: best.rule.id === "clinical-tools" && destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
           ? 0.66 // Topic evidence is not independent proof of destination authority.
           : 0.68 +
             Math.min(best.directMatches.length, 4) * 0.02 +
             (establishedFolder ? 0.04 : 0) +
             (clusterSupport ? 0.04 : 0),
-        evidenceStrength: destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+        evidenceStrength: best.rule.id === "clinical-tools" && destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
           ? "SUPPORTED"
           : "STRONG",
         explanation: `The readable or reviewed content includes the related concepts ${matchedConcepts}. ${folderEvidence} Together, that evidence supports reviewing ${destinationFolder} as a destination.`,
