@@ -13,6 +13,7 @@ export type LocalBridgeHealth = {
   status:
     | "BRIDGE_UNAVAILABLE"
     | "BRIDGE_READY"
+    | "BRIDGE_NOT_PAIRED"
     | "FOLDER_SELECTION_IN_PROGRESS";
   platform: string | null;
   version: string | null;
@@ -245,13 +246,13 @@ export async function getLocalBridgeHealth(): Promise<LocalBridgeHealth> {
       ok: true;
       paired: boolean;
       platform: string;
-      status: "BRIDGE_READY";
+      status: "BRIDGE_READY" | "BRIDGE_NOT_PAIRED";
       version: string;
     }>(response);
 
     return {
-      message: "Bridge ready",
-      ok: true,
+      message: payload.paired ? "Bridge ready" : "Bridge running but not paired",
+      ok: payload.paired,
       paired: payload.paired,
       platform: payload.platform,
       status: payload.status,
