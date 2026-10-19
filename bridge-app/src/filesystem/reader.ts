@@ -328,35 +328,37 @@ async function extractVideoReview(
   } satisfies BridgeReadResult;
 }
 
+async function readStrictUtf8(filePath: string) {
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(filePath);
+  } catch {
+    throw new BridgeAppError("This file could not be read safely.", "FILE_UNREADABLE", 422);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new BridgeAppError(
+      "This text file contains invalid UTF-8 bytes and needs a different encoding or a corrected copy.",
+      "FILE_INVALID_ENCODING",
+      422,
+    );
+  }
+}
+
 async function extractText(filePath: string, extension: string) {
   if (extension === ".txt" || extension === ".md" || extension === ".markdown") {
-    try {
-      return {
-        text: await readFile(filePath, "utf8"),
-        warnings: [] as string[],
-      };
-    } catch {
-      throw new BridgeAppError(
-        "This file could not be read safely.",
-        "FILE_UNREADABLE",
-        422,
-      );
-    }
+    return {
+      text: await readStrictUtf8(filePath),
+      warnings: [] as string[],
+    };
   }
 
   if (extension === ".html" || extension === ".htm") {
-    try {
-      return {
-        text: htmlToText(await readFile(filePath, "utf8")),
-        warnings: [] as string[],
-      };
-    } catch {
-      throw new BridgeAppError(
-        "This file could not be read safely.",
-        "FILE_UNREADABLE",
-        422,
-      );
-    }
+    return {
+      text: htmlToText(await readStrictUtf8(filePath)),
+      warnings: [] as string[],
+    };
   }
 
   if (extension === ".pdf") {
