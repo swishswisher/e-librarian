@@ -36,6 +36,10 @@ jobs:
           node-version: '22.13'
           cache: npm
       - run: npm ci
+      - name: Use a disposable personal-folder temp root (not macOS system /var)
+        run: |
+          mkdir -p "$HOME/nsn-native-acceptance-tmp"
+          echo "TMPDIR=$HOME/nsn-native-acceptance-tmp" >> "$GITHUB_ENV"
       - name: Sweep issues 6, 8, 11, and 12 against synthetic native Mac filesystem
         run: node --test --test-concurrency=1 --import tsx bridge-app/tests/mac-acceptance-sweep.test.ts
       - name: Verify native scanner, malformed reads and bridge health
