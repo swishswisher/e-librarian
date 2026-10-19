@@ -549,6 +549,10 @@ test("explicit regeneration revisits terminal files that no longer have current 
   assert.equal(processedFile.processingStage, "SUGGESTIONS_GENERATED");
   assert.equal(firstObservationCount, 1);
   assert.equal(firstActiveSuggestions.length, 1);
+  // Examined files with valid current recommendations count as settled.
+  const originalProgress = await getBridgeScanSessionProgress(sessionId);
+  assert.equal(originalProgress?.progress.filesProcessed, 1);
+  assert.equal(originalProgress?.progress.remainingFiles, 0);
   assert.equal(
     firstActiveSuggestions[0]?.suggestionType,
     "INSUFFICIENT_EVIDENCE",
@@ -572,6 +576,7 @@ test("explicit regeneration revisits terminal files that no longer have current 
 
   assert.ok(progressAfterInvalidation);
   assert.equal(progressAfterInvalidation.progress.filesWithSuggestions, 0);
+  assert.equal(progressAfterInvalidation.progress.filesProcessed, 0);
   assert.equal(progressAfterInvalidation.progress.remainingFiles, 1);
 
   const regenerated = await processNextBridgeScanSessionFile(sessionId, {
@@ -579,6 +584,7 @@ test("explicit regeneration revisits terminal files that no longer have current 
   });
 
   assert.equal(regenerated.progress.filesWithSuggestions, 1);
+  assert.equal(regenerated.progress.filesProcessed, 1);
   assert.equal(regenerated.progress.remainingFiles, 0);
 
   const afterRegeneration = await storedFile(sessionId, relativePath);
