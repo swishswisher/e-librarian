@@ -565,6 +565,17 @@ export async function executeBridgeUndoActions(
     return executeBridgeUndoActionsOwned(rootId, actions);
   });
 }
+// Read-only audit. A sync agent may restore a directory name after the
+// original owned inode was removed; such a replacement must never be deleted.
+export async function inspectUndoFolderName(rootPath: string, relativePath: string):
+  Promise<"ABSENT" | "REOCCUPIED" | "UNVERIFIED"> {
+  try {
+    const target = await resolveInsideRoot(rootPath, relativePath);
+    try { await lstat(target.resolvedPath); return "REOCCUPIED"; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "ABSENT" : "UNVERIFIED"; }
+  } catch { return "UNVERIFIED"; }
+}
+
 async function executeBridgeUndoActionsOwned(rootId: string, actions: BridgeUndoPlanAction[]) {
   const unstarted: BridgeUndoPlanAction[] = [];
   for (const action of actions) if (!await hasPhysicalActionJournal(`undo:${rootId}:${action.id}`)) unstarted.push(action);
@@ -629,6 +640,18 @@ async function executeBridgeUndoActionsOwned(rootId: string, actions: BridgeUndo
       await settleFailedPhysicalAction(rootId, root.actualPath, action, result, true);
       break;
     }
+  }
+
+  // Inspect all completed folder removals after the final Undo operation.
+  // Historical removal stays COMPLETE even when an outside process recreates
+  // its public name; persist an explicit warning, not another filesystem edit.
+  for (const action of actions) {
+    if (action.actionType !== "REMOVE_FOLDER") continue;
+    const result = resultById.get(action.id);
+    if (!result || result.status !== "COMPLETED") continue;
+    const state = await inspectUndoFolderName(root.actualPath, action.sourceRelativePath);
+    if (state !== "ABSENT") result.safeErrorCategory = state === "REOCCUPIED"
+      ? "UNDO_FOLDER_NAME_REOCCUPIED" : "UNDO_FOLDER_POSTCONDITION_UNVERIFIED";
   }
 
   const completedActions = results.filter(

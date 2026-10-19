@@ -447,6 +447,12 @@ function undoActionTypeLabel(actionType: string) {
 }
 
 function safeErrorLabel(errorCategory: string) {
+  if (errorCategory === "UNDO_FOLDER_NAME_REOCCUPIED") {
+    return "The owned folder was removed, but another item now occupies the path. The Bridge preserved it; inspect before cleanup.";
+  }
+  if (errorCategory === "UNDO_FOLDER_POSTCONDITION_UNVERIFIED") {
+    return "The Bridge removed its owned folder, but could not verify its current path. Inspect before cleanup.";
+  }
   if (errorCategory === "COMMAND_RECOVERY_REQUIRED" || errorCategory.startsWith("PHYSICAL_ACTION_STARTED:")) {
     return "The Bridge cannot yet verify this filesystem outcome. Recovery or inspection is required before another operation.";
   }
@@ -930,6 +936,9 @@ function UndoPreviewPanel({ preview }: { preview: BridgeUndoPreview }) {
 }
 
 function UndoRunPanel({ run }: { run: BridgeUndoRunSummary }) {
+  const folderWarnings = run.actions.filter(a =>
+    a.safeErrorCategory === "UNDO_FOLDER_NAME_REOCCUPIED" ||
+    a.safeErrorCategory === "UNDO_FOLDER_POSTCONDITION_UNVERIFIED");
   const skippedActions = run.actions.filter(
     (action) => action.status === "PENDING",
   ).length;
@@ -959,6 +968,11 @@ function UndoRunPanel({ run }: { run: BridgeUndoRunSummary }) {
           <p>{safeErrorLabel(run.safeErrorCategory)}</p>
         ) : null}
       </div>
+      {folderWarnings.length ? (
+        <p role="alert" className="rounded-md border border-[var(--nsn-warm-beige)] bg-[var(--nsn-sand)] p-3 text-sm leading-6 text-[var(--nsn-warning)]">
+          A folder name reappeared or could not be verified after Undo. The Bridge preserved its new occupant. Inspect the path before cleanup.
+        </p>
+      ) : null}
       <div className="grid gap-3">
         {run.actions.map((action) => (
           <div

@@ -7,6 +7,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { moveWithoutReplacement, physicalFileIdentity, samePhysicalIdentity, usablePhysicalIdentity } from "../src/filesystem/safe-move";
 import { journaledMove, journaledCreateFolder, journaledRemoveFolder, recoverPhysicalAction } from "../src/filesystem/physical-journal";
+import { inspectUndoFolderName } from "../src/filesystem/operations";
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "nsn-physical-invariant-"));
@@ -158,6 +159,19 @@ test("RECOVER-1 safe legacy identities still recover owned moves; new journals p
   const created = await journaledCreateFolder("exact-folder", folder); assert.equal(created.identity?.encoding, "bigint-v1");
   assert.equal((await journaledRemoveFolder("exact-undo", "exact-folder", folder)).state, "COMPLETED");
   assert.deepEqual(await journaledRemoveFolder("exact-undo", "exact-folder", folder), await recoverPhysicalAction("exact-undo"));
+});
+
+test("UNDO-1 preserved replacement after completed folder removal is visibly detectable", async t => {
+  const f = await fixture(t);
+  const folder = path.join(f.directory, "removal-target");
+  await journaledCreateFolder("original-folder-owner", folder);
+  await journaledRemoveFolder("undo-folder-owner", "original-folder-owner", folder);
+  assert.equal(await inspectUndoFolderName(f.directory, "removal-target"), "ABSENT");
+  await mkdir(folder);
+  await mkdir(path.join(folder, ".nsn-move-restored"));
+  assert.equal(await inspectUndoFolderName(f.directory, "removal-target"), "REOCCUPIED");
+  assert.equal((await recoverPhysicalAction("undo-folder-owner"))?.state, "COMPLETED");
+  assert.deepEqual(await readdir(folder), [".nsn-move-restored"]);
 });
 
 test("FILE-1 folder replacement between verification and capture is retained unresolved, never deleted", async (t) => {
