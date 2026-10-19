@@ -162,6 +162,25 @@ describe("NSN Bridge core", () => {
     }
   });
 
+  it("reports local reachability without falsely claiming cloud pairing", async () => {
+    for (const paired of [false, true]) {
+      const server = createBridgeServer({ isCloudPaired: async () => paired });
+      const address = await new Promise<AddressInfo>((resolve) => {
+        server.listen(0, "127.0.0.1", () => resolve(server.address() as AddressInfo));
+      });
+      try {
+        const response = await fetch(`http://127.0.0.1:${address.port}/bridge/v1/health`);
+        assert.equal(response.status, 200);
+        const status = await response.json();
+        assert.equal(status.ok, true);
+        assert.equal(status.paired, paired);
+        assert.equal(status.status, paired ? "BRIDGE_READY" : "BRIDGE_NOT_PAIRED");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+  });
+
   it("registers a root from a selection token and consumes the token", async () => {
     const folder = await makeSafeFolder("library-a");
     const selection = await createFolderSelection(folder);
@@ -608,6 +627,23 @@ describe("NSN Bridge core", () => {
         error instanceof BridgeAppError &&
         error.code === "VIDEO_DECODE_FAILED",
     );
+  });
+
+  it("scans a single supported .txt file and distinguishes genuinely empty roots", async () => {
+    const folder = await makeSafeFolder("library-single-file");
+    const root = await connectFolder(folder);
+    const empty = await scanBridgeRoot(root.id);
+    assert.equal(empty.totalFiles, 0);
+    assert.equal(empty.files.length, 0);
+
+    await writeFile(path.join(folder, "synthetic_client_worksheet.txt"), "Synthetic worksheet.\\n");
+    const scan = await scanBridgeRoot(root.id);
+    assert.equal(scan.totalFiles, 1);
+    assert.equal(scan.supportedFiles, 1);
+    assert.equal(scan.files[0].relativePath, "synthetic_client_worksheet.txt");
+    assert.equal(scan.files[0].fileType, "TEXT");
+    assert.equal(scan.files[0].readStatus, "SUPPORTED");
+    assert.equal(scan.files[0].checksum, createHash("sha256").update("Synthetic worksheet.\\n").digest("hex"));
   });
 
   it("classifies FLAC and OGG files as supported audio during scanning", async () => {
