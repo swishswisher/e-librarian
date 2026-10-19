@@ -1994,14 +1994,27 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     // destinations merely because their files share clinical vocabulary.
     const sourceScope = context.currentRelativePath.split("/").filter(Boolean);
     const targetScope = folder.split("/").filter(Boolean);
+    // A real client name repeated in the file's own title and content can
+    // identify a specific established owner destination from an unfiled intake
+    // bucket. Generic words or the candidate folder name alone cannot do so.
+    const ownerTokens = tokenize(path.posix.basename(folder));
+    const sourceTextTokens = new Set(tokenize(context.contentText));
+    const intakeRoot = sourceScope[0]?.toLowerCase() === "clients" ||
+      stagingFolderPattern.test(sourceScope[0] ?? "");
+    const fromUnfiledIntake = intakeRoot &&
+      sourceScope.slice(1, -1).every((part) => stagingFolderPattern.test(part));
+    const concreteOwnerMatch = fromUnfiledIntake && targetScope.length === 1 &&
+      ownerTokens.length === 1 && sourceFileNameTerms.has(ownerTokens[0]!) &&
+      sourceTextTokens.has(ownerTokens[0]!);
     if (targetScope.length >= 2 &&
         (sourceScope[0] !== targetScope[0] ||
-         (sourceScope.length >= 3 && sourceScope[1] !== targetScope[1]))) {
+         (sourceScope.length >= 3 && sourceScope[1] !== targetScope[1])) &&
+        !concreteOwnerMatch) {
       continue;
     }
-    // Generic grouping must not move an established archive into a shallow
-    // topic folder either; file-to-file overlap does not grant relocation.
-    if (suppressBroadCategoryMove(context.currentRelativePath, folder)) {
+    // Unrelated named archives must remain intact; a genuinely evidenced
+    // owner-name match from an intake queue may still be considered.
+    if (suppressBroadCategoryMove(context.currentRelativePath, folder) && !concreteOwnerMatch) {
       continue;
     }
 
