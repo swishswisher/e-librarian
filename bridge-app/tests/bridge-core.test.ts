@@ -21,6 +21,8 @@ import {
   updateRoot,
 } from "../src/main/registry";
 import { getOrCreatePairingSecret } from "../src/security/pairing";
+import { saveBridgeSecret } from "../../apps/bridge/src/main/keychain";
+import { createBridgeKeyPair } from "../../packages/bridge-protocol/src";
 import {
   acknowledgeBridgeWatcherEvents,
   isWatching,
@@ -162,6 +164,34 @@ describe("NSN Bridge core", () => {
     }
   });
 
+  it("health differentiates a reachable unpaired Bridge from complete native pairing credentials", async () => {
+    const previous = process.env.NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS;
+    process.env.NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS = "1";
+    const server = createBridgeServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port));
+    });
+    const healthUrl = `http://127.0.0.1:${port}/bridge/v1/health`;
+    try {
+      const unpaired = await fetch(healthUrl).then((response) => response.json());
+      assert.equal(unpaired.ok, true);
+      assert.equal(unpaired.paired, false);
+      assert.equal(unpaired.status, "BRIDGE_UNAVAILABLE");
+
+      const keys = createBridgeKeyPair();
+      await saveBridgeSecret("bridge-device-id", "native-health-test-device");
+      await saveBridgeSecret("device-private-key", keys.privateKey);
+      const paired = await fetch(healthUrl).then((response) => response.json());
+      assert.equal(paired.paired, true);
+      assert.equal(paired.status, "BRIDGE_READY");
+      assert.equal(JSON.stringify(paired).includes(keys.privateKey), false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (previous === undefined) delete process.env.NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS;
+      else process.env.NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS = previous;
+    }
+  });
+
   it("registers a root from a selection token and consumes the token", async () => {
     const folder = await makeSafeFolder("library-a");
     const selection = await createFolderSelection(folder);
@@ -210,6 +240,31 @@ describe("NSN Bridge core", () => {
 
       assert.equal(third.id, first.id);
     }
+  });
+
+  it("discovers a single supported text file and allows an actually empty root", async () => {
+    const folder = await makeSafeFolder("single-file-inventory");
+    await writeFile(path.join(folder, "synthetic_client_worksheet.txt"), "One synthetic worksheet.\n");
+    const root = await connectFolder(folder);
+    const scan = await scanBridgeRoot(root.id);
+    assert.equal(scan.totalFiles, 1);
+    assert.equal(scan.supportedFiles, 1);
+    assert.deepEqual(scan.files.map((file) => file.relativePath), ["synthetic_client_worksheet.txt"]);
+
+    const empty = await connectFolder(await makeSafeFolder("actually-empty-root"));
+    const emptyScan = await scanBridgeRoot(empty.id);
+    assert.equal(emptyScan.totalFiles, 0);
+    assert.deepEqual(emptyScan.files, []);
+  });
+
+  it("fails promptly and explicitly on corrupt UTF-8 rather than inventing replacement text", { timeout: 4_000 }, async () => {
+    const folder = await makeSafeFolder("invalid-utf8-document");
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "garbled_utf8.txt"), Buffer.from([0x48, 0x65, 0xff, 0xfe, 0x78, 0x00, 0x0a]));
+    await assert.rejects(
+      () => readBridgeRootFile(root.id, "garbled_utf8.txt"),
+      (error: unknown) => error instanceof BridgeAppError && error.code === "TEXT_DECODE_FAILED",
+    );
   });
 
   it("enforces read and watch permissions", async () => {

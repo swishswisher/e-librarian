@@ -71,7 +71,7 @@ function stageLabel(status: BridgeScanSessionStatus) {
 }
 
 function scanSummaryText(progress: BridgeScanProcessingProgress) {
-  return `${progress.filesDiscovered} found, ${progress.filesProcessed} examined, ${progress.filesWithSuggestions} files with recommendations, ${progress.unsupportedFiles} unsupported, ${progress.failedFiles} needing attention, ${progress.remainingFiles} remaining.`;
+  return `${progress.filesDiscovered} found, ${progress.filesExamined} examined, ${progress.filesProcessed} settled, ${progress.filesWithSuggestions} files with recommendations, ${progress.unsupportedFiles} unsupported, ${progress.failedFiles} needing attention, ${progress.remainingFiles} remaining.`;
 }
 
 function hasReviewableSuggestions(progress: BridgeScanProcessingProgress | null) {
@@ -231,8 +231,7 @@ export function BridgeScanControl({
     if (
       !progress?.isActive ||
       isCreatingScan ||
-      isProcessingRequest ||
-      processingPaused
+      isProcessingRequest
     ) {
       return;
     }
@@ -259,6 +258,14 @@ export function BridgeScanControl({
           return;
         }
 
+        if (processingPaused) {
+          // A stalled view still polls read-only. Resume ordinary processing
+          // on the next render only after the persisted session becomes live.
+          setProcessingPaused(false);
+          setError(null);
+          return;
+        }
+
         await processSessionStep(nextProgress.sessionId);
       } catch {
         if (!cancelled) {
@@ -266,7 +273,7 @@ export function BridgeScanControl({
           setError("The Librarian stopped examining this folder unexpectedly.");
         }
       }
-    }, progressPollDelayMs);
+    }, processingPaused ? 5_000 : progressPollDelayMs);
 
     return () => {
       cancelled = true;
@@ -486,7 +493,7 @@ export function BridgeScanControl({
             </div>
             <div className="grid grid-cols-2 gap-2 text-[var(--nsn-navy)] sm:grid-cols-3">
               <span>{progress.filesDiscovered} found</span>
-              <span>{progress.filesProcessed} examined</span>
+              <span>{progress.filesExamined} examined</span>
               <span>{progress.filesWithSuggestions} files with recommendations</span>
               <span>{progress.unsupportedFiles} unsupported</span>
               <span>{progress.failedFiles} need attention</span>

@@ -1719,6 +1719,16 @@ export function sourceLocationsForRecommendation(contentText: string, concepts: 
     .map((excerpt) => `Source location: characters ${excerpt.start}-${excerpt.end} of extracted text.`);
 }
 
+// A broad topic is not evidence that another client's archive is the
+// correct destination. Preserve explicit archive/organization boundaries
+// until a human-reviewed scoped preference authorizes a structural change.
+function archiveOwnerScope(relativePath: string) {
+  const [section, owner] = relativePath.replace(/\\/g, "/").split("/");
+  return (section === "00_EXISTING_ARCHIVE" || section === "08_DEEP_ARCHIVES") && owner
+    ? `${section}/${owner}`
+    : null;
+}
+
 function moveAndFolderDrafts(context: SuggestionContext) {
   const best = bestRuleFor(context);
 
@@ -1753,6 +1763,12 @@ function moveAndFolderDrafts(context: SuggestionContext) {
       (best.rule.id === "workshops" && relationship.relationshipKind === "SAME_WORKSHOP"))
     .slice(0, 2);
   const currentFolder = folderFromRelativePath(context.currentRelativePath);
+  if (archiveOwnerScope(context.currentRelativePath) &&
+      !destinationFolder.includes("/") && !approvedPreference) {
+    // A generic category must never flatten a structured client's archive
+    // from provisional topic overlap alone.
+    return [];
+  }
   const proposedRelativePath = joinRelativePath(destinationFolder, context.fileName);
   const drafts: SuggestionDraft[] = [];
   const matchedConcepts = best.directMatches.join(", ");
@@ -1941,6 +1957,11 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     }
 
     const folder = folderFromRelativePath(file.relativePath);
+    const sourceScope = archiveOwnerScope(context.currentRelativePath);
+    const candidateScope = archiveOwnerScope(file.relativePath);
+    if ((sourceScope || candidateScope) && sourceScope !== candidateScope) {
+      continue;
+    }
     const overlap = [
       ...new Set(
         tokenize(file.relativePath).filter((term) => semanticTerms.has(term)),

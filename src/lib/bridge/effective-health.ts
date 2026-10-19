@@ -37,7 +37,11 @@ export function effectiveBridgeHealth(
   devices: BridgeDeviceSummary[],
   now = new Date(),
 ): LocalBridgeHealth {
-  return localBridgeHealth.ok
+  // An authenticated cloud device's recent heartbeat is authoritative when
+  // present. A local Bridge port can remain reachable after device revocation
+  // or when the desktop is paired to a different server/account.
+  if (devices.length > 0) return cloudBridgeHealth(devices, now);
+  return localBridgeHealth.ok && localBridgeHealth.paired
     ? localBridgeHealth
     : cloudBridgeHealth(devices, now);
 }

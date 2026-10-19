@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
+import { bridgeIdentityCanAuthenticate, getCompletePairedBridgeIdentity } from "../../../apps/bridge/src/main/cloud-client";
 
 import {
   assertBridgeExecutionAllowed,
@@ -488,11 +489,15 @@ export function createBridgeServer() {
       validateOrigin(request);
 
       if (request.method === "GET" && requestUrl.pathname === "/bridge/v1/health") {
+        // A reachable local HTTP port is not proof of a paired cloud identity.
+        // Never disclose saved device IDs, private keys, or secret-store errors.
+        const identity = await getCompletePairedBridgeIdentity();
+        const paired = bridgeIdentityCanAuthenticate(identity);
         sendJson(request, response, 200, {
           ok: true,
-          paired: true,
+          paired,
           platform: process.platform,
-          status: "BRIDGE_READY",
+          status: paired ? "BRIDGE_READY" : "BRIDGE_UNAVAILABLE",
           version: bridgeVersion,
         });
         return;

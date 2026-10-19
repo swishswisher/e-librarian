@@ -11,6 +11,7 @@ import { NsnCard } from "@/components/library/NsnCard";
 import { NsnEmptyState } from "@/components/library/NsnEmptyState";
 import { NsnSearchField } from "@/components/library/NsnSearchField";
 import { getRecommendationExamineRoute } from "@/lib/library/routes";
+import { recommendationPathSearchMatches } from "@/lib/bridge/recommendation-path-search";
 import type {
   BridgeOrganizationSuggestionMutationResponse,
   BridgeOrganizationSuggestionSummary,
@@ -519,42 +520,7 @@ export function OrganizationSuggestionsReviewPanel({
           return false;
         }
 
-        const query = searchQuery.trim().toLowerCase();
-
-        if (!query) {
-          return true;
-        }
-
-        return [
-          suggestion.title,
-          suggestion.currentRelativePath,
-          suggestion.proposedRelativePath,
-          suggestion.proposedFileName,
-          suggestion.explanation,
-          suggestion.whySuggested.join(" "),
-          suggestion.supportingInformation.join(" "),
-          suggestion.alternatives
-            .flatMap((alternative) => [
-              alternative.title,
-              alternative.proposedRelativePath,
-              alternative.proposedFileName,
-              alternative.explanation,
-            ])
-            .filter(Boolean)
-            .join(" "),
-          suggestion.duplicateEvidence
-            .flatMap((match) => [
-              match.connectedLibraryName,
-              match.relativePath,
-              ...match.signals,
-            ])
-            .join(" "),
-          libraryNameBySuggestionId[suggestion.id],
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .includes(query);
+        return recommendationPathSearchMatches(suggestion, searchQuery);
       }),
     [
       activeFilter,

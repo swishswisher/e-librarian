@@ -328,14 +328,29 @@ async function extractVideoReview(
   } satisfies BridgeReadResult;
 }
 
+async function strictUtf8Text(filePath: string) {
+  const bytes = await readFile(filePath);
+  try {
+    // Buffer.toString("utf8") silently invents replacement characters for
+    // corrupt source bytes; never treat them as document evidence.
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new BridgeAppError(
+      "This text file contains invalid UTF-8 and could not be read safely.",
+      "TEXT_DECODE_FAILED", 422,
+    );
+  }
+}
+
 async function extractText(filePath: string, extension: string) {
   if (extension === ".txt" || extension === ".md" || extension === ".markdown") {
     try {
       return {
-        text: await readFile(filePath, "utf8"),
+        text: await strictUtf8Text(filePath),
         warnings: [] as string[],
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof BridgeAppError) throw error;
       throw new BridgeAppError(
         "This file could not be read safely.",
         "FILE_UNREADABLE",
@@ -347,10 +362,11 @@ async function extractText(filePath: string, extension: string) {
   if (extension === ".html" || extension === ".htm") {
     try {
       return {
-        text: htmlToText(await readFile(filePath, "utf8")),
+        text: htmlToText(await strictUtf8Text(filePath)),
         warnings: [] as string[],
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof BridgeAppError) throw error;
       throw new BridgeAppError(
         "This file could not be read safely.",
         "FILE_UNREADABLE",

@@ -5,12 +5,14 @@ import test from "node:test";
 import {
   actionCanBeChosen,
   chooseActionForSource,
+  completedExecutionActionCounts,
   organizationPlanDecisionGroups,
   organizationPlanDownload,
   organizationPlanLiveSummary,
   selectionMatchesSavedPlan,
 } from "../../src/lib/bridge/organization-plan-review";
 import { currentRecommendationGenerationVersion } from "../../src/lib/bridge/recommendation-generation";
+import { recommendationPathSearchMatches } from "../../src/lib/bridge/recommendation-path-search";
 import {
   calibratedDuplicateConfidence,
   reconcileRecommendationDrafts,
@@ -23,6 +25,31 @@ import type {
   OrganizationSuggestionType,
   OrganizationPlanActionType,
 } from "../../src/lib/bridge/types";
+
+test("filename search matches the recommendation's own file, not cross-referenced evidence", () => {
+  const target = { currentRelativePath: "00_EXISTING_ARCHIVE/HFA/Restorative/RPR_03_Participant_worksheet.md",
+    proposedRelativePath: "Clinical Tools/RPR_03_Participant_worksheet.md", proposedFileName: null };
+  const related = { currentRelativePath: "00_EXISTING_ARCHIVE/HFA/Restorative/RPR_02_Session_plan.md",
+    proposedRelativePath: "Clinical Tools/RPR_02_Session_plan.md", proposedFileName: null };
+  assert.equal(recommendationPathSearchMatches(target, "RPR_03_Participant_worksheet.md"), true);
+  assert.equal(recommendationPathSearchMatches(related, "RPR_03_Participant_worksheet.md"), false);
+  assert.equal(recommendationPathSearchMatches(target, target.currentRelativePath), true);
+  assert.equal(recommendationPathSearchMatches(related, "RPR_02_"), true);
+  assert.equal(recommendationPathSearchMatches(related, ""), true);
+});
+
+test("completed organization history counts actual created folders after selected dependencies disappear", () => {
+  const actions = [
+    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: true },
+    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "MOVE_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "RENAME_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "CREATE_FOLDER", status: "FAILED", createdFilesystemItem: true },
+  ] as const;
+  assert.deepEqual(completedExecutionActionCounts(actions), {
+    filesMoved: 1, filesRenamed: 1, foldersCreated: 1,
+  });
+});
 
 function action(input: {
   actionType?: OrganizationPlanActionType;

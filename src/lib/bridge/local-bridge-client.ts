@@ -242,16 +242,18 @@ export async function getLocalBridgeHealth(): Promise<LocalBridgeHealth> {
       timeoutMs: 2_000,
     });
     const payload = await readPayload<{
-      ok: true;
+      ok: boolean;
       paired: boolean;
       platform: string;
-      status: "BRIDGE_READY";
+      status: "BRIDGE_READY" | "BRIDGE_UNAVAILABLE";
       version: string;
     }>(response);
 
     return {
-      message: "Bridge ready",
-      ok: true,
+      message: payload.paired
+        ? "Bridge ready"
+        : "NSN Bridge is running but this Mac is not paired with the Librarian.",
+      ok: payload.ok && payload.paired,
       paired: payload.paired,
       platform: payload.platform,
       status: payload.status,

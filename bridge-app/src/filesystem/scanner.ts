@@ -279,6 +279,43 @@ async function scanDirectory(
   }
 }
 
+// A complete scan is an exhaustive inventory, not just a successful walk.
+// A second read-only directory enumeration detects a root which appeared empty
+// during discovery but has discoverable files before the result is committed.
+// It also prevents partial inventories from being published as complete when
+// a folder changes during the walk. No file contents are read in this pass.
+async function assertCompleteInventory(rootPath: string, files: BridgeScannedFileDraft[]) {
+  const recorded = new Set(files.map((file) => pathKey(file.relativePath)));
+  const actual = new Set<string>();
+  async function collect(folder: string): Promise<void> {
+    const entries = await readdir(folder, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(folder, entry.name);
+      const relativePath = relativePathFor(rootPath, fullPath);
+      if (shouldIgnore(relativePath)) continue;
+      const stat = await lstat(fullPath).catch(() => null);
+      if (!stat) {
+        throw new BridgeAppError(
+          "A file changed during this scan. Scan the connected folder again.",
+          "SCAN_INVENTORY_INCOMPLETE", 409,
+        );
+      }
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        await collect(fullPath);
+      } else if (stat.isFile() || stat.isSymbolicLink()) {
+        actual.add(pathKey(relativePath));
+      }
+    }
+  }
+  await collect(rootPath);
+  if (actual.size !== recorded.size || [...actual].some((relative) => !recorded.has(relative))) {
+    throw new BridgeAppError(
+      "The file inventory changed or was incomplete during this scan. Scan the connected folder again.",
+      "SCAN_INVENTORY_INCOMPLETE", 409,
+    );
+  }
+}
+
 export async function scanBridgeRoot(
   rootId: string,
   options: ScanBridgeRootOptions = {},
@@ -306,6 +343,8 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
     options.imageMetadataExtractor ?? extractImageMetadata,
     options.beforeImageChecksum,
   );
+
+  await assertCompleteInventory(root.actualPath, files);
 
   const completedAt = new Date();
   const supportedFiles = files.filter((file) => file.readStatus === "SUPPORTED").length;

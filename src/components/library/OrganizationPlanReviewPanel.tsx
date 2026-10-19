@@ -28,6 +28,7 @@ import type {
 import {
   actionCanBeChosen,
   chooseActionForSource,
+  completedExecutionActionCounts,
   organizationPlanDownload,
   organizationPlanDecisionGroups,
   organizationPlanLiveSummary,
@@ -1727,6 +1728,13 @@ export function OrganizationPlanReviewPanel({
     planStatus: currentPlan.status,
     undoStatus: visibleUndoRun?.status,
   });
+  const historicalSummary = {
+    ...liveSummary,
+    ...completedExecutionActionCounts(executionRun?.actions ?? []),
+  };
+  const safetySummary = (planUiState === "COMPLETED" || planUiState === "UNDONE") && executionRun
+    ? historicalSummary
+    : liveSummary;
   const executionLifecycleLocked =
     planUiState === "EXECUTING" ||
     planUiState === "COMPLETED" ||
@@ -1810,31 +1818,31 @@ export function OrganizationPlanReviewPanel({
             </div>
             <ul className="grid min-w-0 gap-2 text-sm text-[var(--nsn-slate)] sm:grid-cols-2 xl:grid-cols-5">
                <li>
-                 {counted(liveSummary.filesMoved, "file")} {planUiState === "UNDONE"
+                 {counted(safetySummary.filesMoved, "file")} {planUiState === "UNDONE"
                    ? "moved during execution and restored"
                    : planUiState === "COMPLETED"
                      ? "moved during execution"
                      : "will move"}
                </li>
                <li>
-                {counted(liveSummary.foldersCreated, "folder")} {planUiState === "UNDONE"
+                {counted(safetySummary.foldersCreated, "folder")} {planUiState === "UNDONE"
                   ? "created during execution and are historical"
                   : planUiState === "COMPLETED"
                     ? "created during execution"
                     : "will be created"}
                </li>
                <li>
-                {counted(liveSummary.filesRenamed, "file")} {planUiState === "UNDONE"
+                {counted(safetySummary.filesRenamed, "file")} {planUiState === "UNDONE"
                   ? "renamed during execution and restored"
                   : planUiState === "COMPLETED"
                     ? "renamed during execution"
                     : "will be renamed"}
                </li>
                <li>
-                {counted(liveSummary.filesDeleted, "file")} would be deleted
+                {counted(safetySummary.filesDeleted, "file")} would be deleted
                </li>
                <li>
-                {counted(liveSummary.filesOverwritten, "file")} would be overwritten
+                {counted(safetySummary.filesOverwritten, "file")} would be overwritten
                </li>
             </ul>
           </div>

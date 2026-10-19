@@ -783,6 +783,18 @@ export async function importRemoteBridgeScanReport(input: {
     return withGrant(async (tx) => {
       const current = await tx.scanSession.findUniqueOrThrow({ where: { id: session.id } });
       if (["FAILED", "CANCELLED"].includes(current.status)) throw new BridgeCloudError("This scan is no longer awaiting inventory.", 409);
+      // A terminal-looking parent without a committed inventory is not proof
+      // that a reconnect/replayed report was ever imported successfully.
+      if (!current.importInventoryHash) {
+        throw new BridgeCloudError("This scan completed without durable inventory proof.", 409, "SCAN_INVENTORY_UNVERIFIED");
+      }
+      const recordedFiles = await tx.scannedFile.count({ where: { sessionId: scanSessionId } });
+      if (recordedFiles !== current.filesScanned || current.importInventoryHash !== createHash("sha256").update(JSON.stringify(
+        [...scan.files].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+        (_key, value: unknown) => typeof value === "bigint" ? value.toString() : value,
+      )).digest("hex")) {
+        throw new BridgeCloudError("The completed scan inventory differs from its replay.", 409, "SCAN_INVENTORY_MISMATCH");
+      }
       return { cloudScanSessionId: scanSessionId, alreadyImported: true };
     }, true);
   }

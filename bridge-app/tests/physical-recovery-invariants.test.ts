@@ -84,6 +84,25 @@ test("RECOVER-1 journal preserves a completed filesystem effect across caller pe
   ]) await assert.rejects(recoverPhysicalAction("synthetic-database-gap", binding), /authority/);
   assert.equal(await readFile(f.destination, "utf8"), f.bytes);
 });
+test("RECOVER-1 completed folder Undo never removes externally recreated names or empty .nsn-move captures", async (t) => {
+  const f = await fixture(t);
+  const directory = path.join(f.directory, "approved-temp");
+  const created = await journaledCreateFolder("recreated-folder-original", directory);
+  assert.equal(created.created, true);
+  const removed = await journaledRemoveFolder("recreated-folder-undo", "recreated-folder-original", directory);
+  assert.equal(removed.state, "COMPLETED");
+  await assert.rejects(lstat(directory), { code: "ENOENT" });
+
+  await mkdir(directory);
+  const unrelated = path.join(directory, ".nsn-move-recreated");
+  await mkdir(unrelated);
+  const current = await lstat(directory, { bigint: true });
+  assert.notEqual(current.ino.toString(), created.identity?.ino);
+  assert.equal((await recoverPhysicalAction("recreated-folder-undo"))?.state, "COMPLETED");
+  assert.equal((await lstat(directory, { bigint: true })).ino, current.ino);
+  assert.deepEqual(await readdir(unrelated), []);
+});
+
 test("FILE-1 Undo removes only the empty directory owned by the original execution", async (t) => {
   const f = await fixture(t), folder = path.join(f.directory, "created");
   await journaledCreateFolder("synthetic-folder-owner", folder);

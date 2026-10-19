@@ -24,9 +24,10 @@ export async function scanProgressCounts(sessionId: string): Promise<Counts> {
       FROM "ScannedFile" f LEFT JOIN suggestions s ON s."scannedFileId" = f.id WHERE f."sessionId" = ${sessionId}
     )
     SELECT count(*) FILTER (WHERE "readingStatus" = 'READ')::integer AS "filesRead",
-      count(*) FILTER (WHERE EXISTS (SELECT 1 FROM "ObservationSession" o WHERE o."libraryDocumentId" = files."libraryDocumentId"))::integer AS "filesExamined",
+      count(*) FILTER (WHERE "processingStage" IN ('EXAMINED', 'SUGGESTIONS_GENERATED', 'RECOMMENDATIONS_READY')
+        OR EXISTS (SELECT 1 FROM "ObservationSession" o WHERE o."libraryDocumentId" = files."libraryDocumentId"))::integer AS "filesExamined",
       count(*) FILTER (WHERE failed OR "processingStage" = 'UNSUPPORTED' OR "readStatus" = 'UNSUPPORTED'
-        OR ("processingStage" IN ('SUGGESTIONS_GENERATED', 'RECOMMENDATIONS_READY') AND suggestions > 0))::integer AS "filesProcessed",
+        OR "processingStage" IN ('EXAMINED', 'SUGGESTIONS_GENERATED', 'RECOMMENDATIONS_READY'))::integer AS "filesProcessed",
       count(*) FILTER (WHERE suggestions > 0)::integer AS "filesWithSuggestions",
       count(*) FILTER (WHERE failed)::integer AS "failedFiles",
       coalesce(sum(suggestions), 0)::integer AS "suggestionsGenerated", coalesce(sum(pending), 0)::integer AS "pendingSuggestions",
