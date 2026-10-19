@@ -528,6 +528,35 @@ test("processes scanned images through image intelligence without treating damag
   assert.equal(retrySuggestionCount, suggestionCountBefore);
 });
 
+test("clinical topics do not flatten organized client and archive hierarchies in basic mode", async () => {
+  const files = new Map([
+    ["00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Restorative_Practices/RPR_03_Participant_worksheet.md",
+      "A clinical worksheet for a client. These clinical practice exercises support supervised client practice and learning."],
+    ["08_DEEP_ARCHIVES/HFA/Dialogue_Samples/RPR_Session_1.txt",
+      "A clinical worksheet and client practice exercise for reviewing safe dialogue and reflection."],
+    ["01_MIXED_INBOX/Downloads/Document_005_untitled.txt",
+      "A clinical worksheet with practice exercises for clients needing reflective support and learning."],
+  ]);
+  const { libraryRoot, sessionId } = await createBridgeBackedTextLibrary(files);
+  const originals = await listRelativeFiles(libraryRoot);
+  await processBridgeScanSession(sessionId, { recordNotebook: false });
+  for (const relativePath of [...files.keys()].filter(p => !p.includes("MIXED_INBOX"))) {
+    const source = await storedFile(sessionId, relativePath);
+    assert.equal(source.organizationSuggestions.some(s =>
+      s.invalidatedAt === null && s.suggestionType === "MOVE_FILE" &&
+      s.proposedRelativePath?.startsWith("Clinical Tools/")), false,
+      `A broad clinical topic cannot flatten established context: ${relativePath}`);
+  }
+  const inbox = await storedFile(sessionId, "01_MIXED_INBOX/Downloads/Document_005_untitled.txt");
+  for (const suggestion of inbox.organizationSuggestions.filter(s =>
+    s.invalidatedAt === null && s.suggestionType === "MOVE_FILE" &&
+    s.proposedRelativePath?.startsWith("Clinical Tools/"))) {
+    assert.ok(suggestion.confidence <= 0.66, "Broad category without human destination evidence is less certain.");
+  }
+  assert.deepEqual(await listRelativeFiles(libraryRoot), originals,
+    "Generating proposals must never mutate physical files.");
+});
+
 test("explicit regeneration revisits terminal files that no longer have current recommendations", async () => {
   const relativePath = "Archive/LetterFromMara.txt";
   const originalText =
