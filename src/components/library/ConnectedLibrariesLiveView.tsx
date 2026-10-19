@@ -6,12 +6,14 @@ import { ConnectedLibrariesManager } from "@/components/library/ConnectedLibrari
 import type {
   ConnectedLibraryListResponse,
   ConnectedLibrarySummary,
+  BridgeScanProcessingProgress,
 } from "@/lib/bridge/types";
 import type { LocalBridgeHealth } from "@/lib/bridge/local-bridge-client";
 
 type ConnectedLibrariesLiveViewProps = {
   initialBridgeHealth: LocalBridgeHealth;
   initialLibraries: ConnectedLibrarySummary[];
+  latestScanProgressByLibraryId: Record<string, BridgeScanProcessingProgress>;
 };
 
 const watchingRefreshDelayMs = 4_000;
@@ -65,6 +67,7 @@ async function readLibraryList(response: Response) {
 export function ConnectedLibrariesLiveView({
   initialBridgeHealth,
   initialLibraries,
+  latestScanProgressByLibraryId,
 }: ConnectedLibrariesLiveViewProps) {
   const [libraries, setLibraries] = useState(initialLibraries);
   const hasWatchingLibrary = libraries.some(
@@ -128,6 +131,7 @@ export function ConnectedLibrariesLiveView({
       key={signature}
       initialBridgeHealth={initialBridgeHealth}
       initialLibraries={libraries}
+      latestScanProgressByLibraryId={latestScanProgressByLibraryId}
     />
   );
 }
