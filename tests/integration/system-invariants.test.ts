@@ -318,7 +318,10 @@ test("SCALE-3 twenty thousand processing candidates use stable bounded productio
     readingStatus: "READ", aiModel: "synthetic-model", observationVersion: "synthetic-version", aiRequestCount: 1,
     aiHttpAttempts: 2, aiInputTokens: 3, aiOutputTokens: 4, observationOrigin: "NEW_AI" } });
   const progress = await (await import("../../src/lib/bridge/scan-sessions")).getBridgeScanSessionProgress(scan.id);
-  assert.ok(progress); assert.equal(progress.progress.filesRead, 3); assert.equal(progress.progress.filesProcessed, 0);
+  assert.ok(progress); assert.equal(progress.progress.filesRead, 3);
+  // EXAMINED rows are settled even without proposed moves; preserve all
+  // 20,000 synthetic rows and the bounded constant-size aggregate query.
+  assert.equal(progress.progress.filesProcessed, count);
   assert.equal(progress.progress.aiUsage.requests, 3); assert.equal(progress.progress.aiUsage.httpAttempts, 6);
   assert.equal(progress.progress.aiUsage.inputTokens, 9); assert.equal(progress.progress.aiUsage.outputTokens, 12);
   assert.deepEqual(progress.progress.aiUsage.models, ["synthetic-model"]);
