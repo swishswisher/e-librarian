@@ -779,17 +779,32 @@ export async function importRemoteBridgeScanReport(input: {
   }
 
   if (!scan) throw new BridgeCloudError("The completed scan inventory is missing.", 400);
-  if (session.status !== "SCANNING") {
-    return withGrant(async (tx) => {
-      const current = await tx.scanSession.findUniqueOrThrow({ where: { id: session.id } });
-      if (["FAILED", "CANCELLED"].includes(current.status)) throw new BridgeCloudError("This scan is no longer awaiting inventory.", 409);
-      return { cloudScanSessionId: scanSessionId, alreadyImported: true };
-    }, true);
-  }
+  // A completed command can be reported again after transport interruption.
+  // Only the *same exact inventory* may be acknowledged as already imported.
+  // A different or empty replay must never mask a previously nonempty scan.
   const inventoryHash = createHash("sha256").update(JSON.stringify(
     [...scan.files].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
     (_key, value: unknown) => typeof value === "bigint" ? value.toString() : value,
   )).digest("hex");
+  if (session.status !== "SCANNING") {
+    return withGrant(async (tx) => {
+      const current = await tx.scanSession.findUniqueOrThrow({ where: { id: session.id } });
+      if (["FAILED", "CANCELLED"].includes(current.status)) throw new BridgeCloudError("This scan is no longer awaiting inventory.", 409);
+      if (!current.importInventoryHash ||
+          current.importInventoryHash !== inventoryHash ||
+          current.filesScanned !== scan.totalFiles ||
+          current.supportedFiles !== scan.supportedFiles ||
+          current.unsupportedFiles !== scan.unsupportedFiles ||
+          current.failedFiles !== scan.failedFiles) {
+        throw new BridgeCloudError(
+          "The completed scan cannot accept a different inventory replay.",
+          409,
+          "SCAN_INVENTORY_MISMATCH",
+        );
+      }
+      return { cloudScanSessionId: scanSessionId, alreadyImported: true, totalFiles: scan.totalFiles };
+    }, true);
+  }
   await withGrant((tx) => tx.scanSession.updateMany({ where: { id: scanSessionId, status: "SCANNING", importInventoryHash: null },
     data: { importInventoryHash: inventoryHash } }));
   const owner = await prisma.scanSession.findUniqueOrThrow({ where: { id: scanSessionId } });
