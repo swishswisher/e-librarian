@@ -1773,6 +1773,12 @@ function moveAndFolderDrafts(context: SuggestionContext) {
       (best.rule.id === "workshops" && relationship.relationshipKind === "SAME_WORKSHOP"))
     .slice(0, 2);
   const currentFolder = folderFromRelativePath(context.currentRelativePath);
+  // Generic clinical subject words do not establish a destination. An
+  // established folder or separately approved preference is required before
+  // proposing a new broad Clinical Tools move.
+  if (best.rule.id === "clinical-tools" && !establishedFolder && !approvedPreference) {
+    return [];
+  }
   // Topic affinity alone cannot justify flattening an established multi-level
   // client/project hierarchy into a broad single category folder.
   if (suppressBroadCategoryMove(

@@ -548,13 +548,36 @@ test("clinical topics do not flatten organized client and archive hierarchies in
       `A broad clinical topic cannot flatten established context: ${relativePath}`);
   }
   const inbox = await storedFile(sessionId, "01_MIXED_INBOX/Downloads/Document_005_untitled.txt");
-  for (const suggestion of inbox.organizationSuggestions.filter(s =>
-    s.invalidatedAt === null && s.suggestionType === "MOVE_FILE" &&
-    s.proposedRelativePath?.startsWith("Clinical Tools/"))) {
-    assert.ok(suggestion.confidence <= 0.66, "Broad category without human destination evidence is less certain.");
-  }
+  assert.equal(inbox.organizationSuggestions.some(s =>
+    s.invalidatedAt === null && ["MOVE_FILE", "GROUP_WITH_FILES"].includes(s.suggestionType) &&
+    s.proposedRelativePath?.startsWith("Clinical Tools/")), false,
+    "A new generic Clinical Tools destination cannot be invented solely from clinical vocabulary.");
   assert.deepEqual(await listRelativeFiles(libraryRoot), originals,
     "Generating proposals must never mutate physical files.");
+});
+
+test("an established Clinical Tools folder can still receive cautious inbox suggestions", async () => {
+  const files = new Map([
+    ["Clinical Tools/cognitive-practice-guide.md",
+      "Clinical client worksheet practice guide with supervised exercises for learning reflection and wellbeing."],
+    ["Clinical Tools/reflective-session-template.md",
+      "A clinical client worksheet and guided practice exercise template for thoughtful wellbeing work."],
+    ["Downloads/new-client-worksheet.txt",
+      "A new client worksheet for structured clinical practice exercises, intended as a supervised teaching resource."],
+  ]);
+  const { libraryRoot, sessionId } = await createBridgeBackedTextLibrary(files);
+  const originals = await listRelativeFiles(libraryRoot);
+  await processBridgeScanSession(sessionId, { recordNotebook: false });
+  const inbox = await storedFile(sessionId, "Downloads/new-client-worksheet.txt");
+  const candidates = inbox.organizationSuggestions.filter(s =>
+    s.invalidatedAt === null && ["MOVE_FILE", "GROUP_WITH_FILES"].includes(s.suggestionType) &&
+    s.proposedRelativePath?.startsWith("Clinical Tools/"));
+  assert.ok(candidates.length >= 1,
+    "An existing, supported topic folder may remain a human-reviewed filing destination.");
+  assert.ok(candidates.every(s => s.confidence <= 0.66 && s.evidenceStrength !== "STRONG"),
+    "Generic clinical vocabulary alone is not strong destination authority.");
+  assert.deepEqual(await listRelativeFiles(libraryRoot), originals,
+    "Recommendations must never change the original files.");
 });
 
 test("explicit regeneration revisits terminal files that no longer have current recommendations", async () => {
