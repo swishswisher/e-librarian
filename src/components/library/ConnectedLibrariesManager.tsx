@@ -808,11 +808,8 @@ export function ConnectedLibrariesManager({
       setLibraries(payload.libraries);
       setSelectionBasket([]);
       setConfirmedOverlapRootIds([]);
-      setBridgeHealth((current) => ({
-        ...current,
-        ok: true,
-        status: "BRIDGE_READY",
-      }));
+      // A successful folder registration does not attest cloud pairing.
+      // Preserve the last confirmed health state until the status endpoint refreshes it.
       setNotice(
         `${payload.connectedCount} folders connected. ${payload.alreadyConnectedCount} folders already connected. ${payload.needsAttentionCount} folders need attention.`,
       );
@@ -1182,19 +1179,27 @@ export function ConnectedLibrariesManager({
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
           <div className="min-w-0">
             <NsnBadge tone={bridgeHealth.ok ? "approved" : "pending"}>
-              {bridgeHealth.ok ? "Bridge ready" : "Bridge unavailable"}
+              {bridgeHealth.ok
+                ? "Bridge ready"
+                : bridgeHealth.status === "BRIDGE_NOT_PAIRED"
+                  ? "Bridge not paired"
+                  : "Bridge unavailable"}
             </NsnBadge>
             <h2 className="nsn-display mt-3 break-words text-2xl text-[var(--nsn-navy)] [overflow-wrap:anywhere]">
               {bridgeHealth.ok
                 ? activeLibraries.length === 0
                   ? "Choose the folders you would like the Librarian to understand."
                   : "Connected Libraries"
-                : "The NSN Bridge is not running."}
+                : bridgeHealth.status === "BRIDGE_NOT_PAIRED"
+                  ? "NSN Bridge is running but has not been paired."
+                  : "The NSN Bridge is not running."}
             </h2>
             <p className="mt-2 break-words text-sm leading-7 text-[var(--nsn-slate)] [overflow-wrap:anywhere]">
               {bridgeHealth.ok
                 ? "The local computer remains the source of truth. The Librarian stores knowledge work and history, not copied files."
-                : "Open the NSN Bridge on this computer to choose and watch local folders."}
+                : bridgeHealth.status === "BRIDGE_NOT_PAIRED"
+                  ? "Open NSN Bridge and pair this Mac with the authorized account before connecting folders."
+                  : "Open the NSN Bridge on this computer to choose and watch local folders."}
             </p>
           </div>
           <div className="flex min-w-0 flex-col gap-2 sm:flex-row lg:justify-end">
@@ -1235,7 +1240,7 @@ export function ConnectedLibrariesManager({
               Bridge Currently Reachable
             </p>
             <p className="mt-1 font-semibold text-[var(--nsn-navy)]">
-              {bridgeHealth.ok ? "Yes" : "No"}
+              {bridgeHealth.ok || bridgeHealth.status === "BRIDGE_NOT_PAIRED" ? "Yes" : "No"}
             </p>
           </div>
           <div>
