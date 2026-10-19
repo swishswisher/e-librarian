@@ -1721,12 +1721,34 @@ export function OrganizationPlanReviewPanel({
       organizationPlanLiveSummary(currentPlan.actions, selectedActionIds),
     [currentPlan.actions, selectedActionIds],
   );
+  // Historical counts must come from the durable execution record, not from
+  // recalculated prospective folder dependencies or the current plan selection.
+  const historicSummary = executionRun
+    ? {
+        filesMoved: executionRun.actions.filter(
+          (action) => action.status === "COMPLETED" &&
+            (action.actionType === "MOVE_FILE" || action.actionType === "MOVE_AND_RENAME_FILE"),
+        ).length,
+        foldersCreated: executionRun.actions.filter(
+          (action) => action.status === "COMPLETED" &&
+            action.actionType === "CREATE_FOLDER" && action.createdFilesystemItem,
+        ).length,
+        filesRenamed: executionRun.actions.filter(
+          (action) => action.status === "COMPLETED" &&
+            (action.actionType === "RENAME_FILE" || action.actionType === "MOVE_AND_RENAME_FILE"),
+        ).length,
+      }
+    : null;
   const visibleUndoRun = undoRun ?? executionRun?.latestUndoRun ?? null;
   const planUiState = organizationPlanUiState({
     executionStatus: executionRun?.status,
     planStatus: currentPlan.status,
     undoStatus: visibleUndoRun?.status,
   });
+  const displayedSummary =
+    (planUiState === "COMPLETED" || planUiState === "UNDONE") && historicSummary
+      ? { ...liveSummary, ...historicSummary }
+      : liveSummary;
   const executionLifecycleLocked =
     planUiState === "EXECUTING" ||
     planUiState === "COMPLETED" ||
@@ -1810,31 +1832,31 @@ export function OrganizationPlanReviewPanel({
             </div>
             <ul className="grid min-w-0 gap-2 text-sm text-[var(--nsn-slate)] sm:grid-cols-2 xl:grid-cols-5">
                <li>
-                 {counted(liveSummary.filesMoved, "file")} {planUiState === "UNDONE"
+                 {counted(displayedSummary.filesMoved, "file")} {planUiState === "UNDONE"
                    ? "moved during execution and restored"
                    : planUiState === "COMPLETED"
                      ? "moved during execution"
                      : "will move"}
                </li>
                <li>
-                {counted(liveSummary.foldersCreated, "folder")} {planUiState === "UNDONE"
+                {counted(displayedSummary.foldersCreated, "folder")} {planUiState === "UNDONE"
                   ? "created during execution and are historical"
                   : planUiState === "COMPLETED"
                     ? "created during execution"
                     : "will be created"}
                </li>
                <li>
-                {counted(liveSummary.filesRenamed, "file")} {planUiState === "UNDONE"
+                {counted(displayedSummary.filesRenamed, "file")} {planUiState === "UNDONE"
                   ? "renamed during execution and restored"
                   : planUiState === "COMPLETED"
                     ? "renamed during execution"
                     : "will be renamed"}
                </li>
                <li>
-                {counted(liveSummary.filesDeleted, "file")} would be deleted
+                {counted(displayedSummary.filesDeleted, "file")} would be deleted
                </li>
                <li>
-                {counted(liveSummary.filesOverwritten, "file")} would be overwritten
+                {counted(displayedSummary.filesOverwritten, "file")} would be overwritten
                </li>
             </ul>
           </div>
