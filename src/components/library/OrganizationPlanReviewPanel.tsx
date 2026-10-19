@@ -28,6 +28,7 @@ import type {
 import {
   actionCanBeChosen,
   chooseActionForSource,
+  historicalExecutionActionCounts,
   organizationPlanDownload,
   organizationPlanDecisionGroups,
   organizationPlanLiveSummary,
@@ -1724,20 +1725,7 @@ export function OrganizationPlanReviewPanel({
   // Historical counts must come from the durable execution record, not from
   // recalculated prospective folder dependencies or the current plan selection.
   const historicSummary = executionRun
-    ? {
-        filesMoved: executionRun.actions.filter(
-          (action) => action.status === "COMPLETED" &&
-            (action.actionType === "MOVE_FILE" || action.actionType === "MOVE_AND_RENAME_FILE"),
-        ).length,
-        foldersCreated: executionRun.actions.filter(
-          (action) => action.status === "COMPLETED" &&
-            action.actionType === "CREATE_FOLDER" && action.createdFilesystemItem,
-        ).length,
-        filesRenamed: executionRun.actions.filter(
-          (action) => action.status === "COMPLETED" &&
-            (action.actionType === "RENAME_FILE" || action.actionType === "MOVE_AND_RENAME_FILE"),
-        ).length,
-      }
+    ? historicalExecutionActionCounts(executionRun.actions)
     : null;
   const visibleUndoRun = undoRun ?? executionRun?.latestUndoRun ?? null;
   const planUiState = organizationPlanUiState({

@@ -2,6 +2,7 @@ import type {
   BridgeOrganizationPlan,
   BridgeOrganizationPlanAction,
   BridgeOrganizationPlanDownload,
+  BridgeExecutionActionSummary,
   OrganizationPlanActionType,
 } from "./types";
 import { isCurrentRecommendationGeneration } from "./recommendation-generation";
@@ -154,6 +155,26 @@ export function organizationPlanLiveSummary(
     ).length,
     folderPaths,
     foldersCreated: folderPaths.length,
+  };
+}
+
+// Use persisted physical execution outcomes for historical summaries. Do not
+// recalculate them from the live plan selection: it may have changed or been
+// undone, and an existing destination folder was not physically created.
+export function historicalExecutionActionCounts(
+  actions: ReadonlyArray<Pick<BridgeExecutionActionSummary, "actionType" | "status" | "createdFilesystemItem">>,
+) {
+  const completed = actions.filter((action) => action.status === "COMPLETED");
+  return {
+    filesMoved: completed.filter(
+      (action) => action.actionType === "MOVE_FILE" || action.actionType === "MOVE_AND_RENAME_FILE",
+    ).length,
+    filesRenamed: completed.filter(
+      (action) => action.actionType === "RENAME_FILE" || action.actionType === "MOVE_AND_RENAME_FILE",
+    ).length,
+    foldersCreated: completed.filter(
+      (action) => action.actionType === "CREATE_FOLDER" && action.createdFilesystemItem,
+    ).length,
   };
 }
 

@@ -5,12 +5,14 @@ import test from "node:test";
 import {
   actionCanBeChosen,
   chooseActionForSource,
+  historicalExecutionActionCounts,
   organizationPlanDecisionGroups,
   organizationPlanDownload,
   organizationPlanLiveSummary,
   selectionMatchesSavedPlan,
 } from "../../src/lib/bridge/organization-plan-review";
 import { currentRecommendationGenerationVersion } from "../../src/lib/bridge/recommendation-generation";
+import { recommendationMatchesOwnFilePath } from "../../src/lib/bridge/recommendation-path-search";
 import {
   calibratedDuplicateConfidence,
   reconcileRecommendationDrafts,
@@ -209,6 +211,42 @@ test("folder dependencies and live safety counts follow the current destination"
       foldersCreated: 3,
     },
   );
+});
+
+test("historical execution counts reflect physical outcomes even after Undo and plan edits", () => {
+  const actions = [
+    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: true },
+    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "CREATE_FOLDER", status: "FAILED", createdFilesystemItem: true },
+    { actionType: "MOVE_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "RENAME_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "MOVE_AND_RENAME_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "MOVE_FILE", status: "FAILED", createdFilesystemItem: false },
+  ] as const;
+
+  assert.deepEqual(historicalExecutionActionCounts(actions), {
+    filesMoved: 2,
+    filesRenamed: 2,
+    foldersCreated: 1,
+  });
+  assert.deepEqual(historicalExecutionActionCounts([]), {
+    filesMoved: 0, filesRenamed: 0, foldersCreated: 0,
+  });
+});
+
+test("filename search excludes unrelated supporting evidence and proposed destinations", () => {
+  const item = {
+    currentRelativePath: "Client A/Intake/worksheet.txt",
+    proposedRelativePath: "Clinical Tools/worksheet.txt",
+    supportingInformation: ["Related file: Client B/Archives/report.txt"],
+    title: "Move with related reports",
+  };
+  assert.equal(recommendationMatchesOwnFilePath(item, "worksheet.txt"), true);
+  assert.equal(recommendationMatchesOwnFilePath(item, "client a/intake"), true);
+  assert.equal(recommendationMatchesOwnFilePath(item, "  WORKSHEET  "), true);
+  assert.equal(recommendationMatchesOwnFilePath(item, "report.txt"), false);
+  assert.equal(recommendationMatchesOwnFilePath(item, "Clinical Tools"), false);
+  assert.equal(recommendationMatchesOwnFilePath(item, ""), true);
 });
 
 test("review-only items cannot become choices and exported JSON contains only shown saved choices", () => {

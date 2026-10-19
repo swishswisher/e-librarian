@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { recommendationMatchesOwnFilePath } from "@/lib/bridge/recommendation-path-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useRouter } from "next/navigation";
@@ -525,15 +526,9 @@ export function OrganizationSuggestionsReviewPanel({
           return true;
         }
 
-        // The field is explicitly labeled "Search by file name or path".
-        // Never match other files mentioned only in evidence or alternatives.
-        return [
-          suggestion.currentRelativePath,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .includes(query);
+        // Search the recommended source file, not evidence mentioning a
+        // different client's file or a proposed destination.
+        return recommendationMatchesOwnFilePath(suggestion, query);
       }),
     [
       activeFilter,
