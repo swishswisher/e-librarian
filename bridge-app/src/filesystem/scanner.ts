@@ -279,6 +279,23 @@ async function scanDirectory(
   }
 }
 
+// Re-enumerate names after collecting metadata. A changed directory listing
+// must never be published as a complete snapshot (including a false empty scan).
+// This is intentionally a names-only pass: no second content upload or checksum.
+async function visiblePaths(rootPath: string, directory: string, paths: Set<string>) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const absolute = path.join(directory, entry.name);
+    const relative = relativePathFor(rootPath, absolute);
+    if (shouldIgnore(relative)) continue;
+    if (entry.isDirectory()) {
+      await visiblePaths(rootPath, absolute, paths);
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      paths.add(relative);
+    }
+  }
+}
+
 export async function scanBridgeRoot(
   rootId: string,
   options: ScanBridgeRootOptions = {},
@@ -306,6 +323,18 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
     options.imageMetadataExtractor ?? extractImageMetadata,
     options.beforeImageChecksum,
   );
+
+  const publishedPaths = new Set(files.map((file) => file.relativePath));
+  const verifiedPaths = new Set<string>();
+  await visiblePaths(root.actualPath, root.actualPath, verifiedPaths);
+  if (publishedPaths.size !== verifiedPaths.size ||
+      [...verifiedPaths].some((relative) => !publishedPaths.has(relative))) {
+    throw new BridgeAppError(
+      "The selected folder changed or its scan inventory was incomplete. Scan it again after checking the folder.",
+      "SCAN_INVENTORY_UNVERIFIED",
+      409,
+    );
+  }
 
   const completedAt = new Date();
   const supportedFiles = files.filter((file) => file.readStatus === "SUPPORTED").length;
