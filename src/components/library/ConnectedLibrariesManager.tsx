@@ -38,6 +38,7 @@ import type {
   ConnectedLibraryPermissions,
   ConnectedLibrarySummary,
   BridgeMonitoringApiResponse,
+  BridgeScanProcessingProgress,
 } from "@/lib/bridge/types";
 import type {
   LocalBridgeFolderSelection,
@@ -47,6 +48,7 @@ import type {
 type ConnectedLibrariesManagerProps = {
   initialBridgeHealth: LocalBridgeHealth;
   initialLibraries: ConnectedLibrarySummary[];
+  latestScanProgressByLibraryId: Record<string, BridgeScanProcessingProgress>;
 };
 
 type PermissionKey = keyof ConnectedLibraryPermissions;
@@ -412,6 +414,7 @@ function monitoringErrorLabel(category: string | null) {
 export function ConnectedLibrariesManager({
   initialBridgeHealth,
   initialLibraries,
+  latestScanProgressByLibraryId,
 }: ConnectedLibrariesManagerProps) {
   const router = useRouter();
   const [bridgeHealth, setBridgeHealth] = useState(initialBridgeHealth);
@@ -1939,6 +1942,7 @@ export function ConnectedLibrariesManager({
                    {canScan ? (
                      <BridgeScanControl
                       connectedLibraryId={library.id}
+                      initialProgress={latestScanProgressByLibraryId[library.id] ?? null}
                       isDevelopment={false}
                       scanLabel="Scan Now"
                     />
