@@ -1032,6 +1032,10 @@ function ExecutionRunPanel({
     (action) => action.status === "COMPLETED",
   ).length;
   const undoCompleted = latestUndoRun?.status === "COMPLETED";
+  const undoNeedsInspection = Boolean(latestUndoRun?.actions.some((action) =>
+    action.safeErrorCategory === "UNDO_FOLDER_NAME_REOCCUPIED" ||
+    action.safeErrorCategory === "UNDO_FOLDER_POSTCONDITION_UNVERIFIED",
+  ));
   const undoRunning = latestUndoRun?.status === "RUNNING";
   const canRequestUndo =
     (run.status === "COMPLETED" || run.status === "PARTIALLY_COMPLETED") &&
@@ -1091,8 +1095,9 @@ function ExecutionRunPanel({
             </NsnButton>
             {undoCompleted ? (
               <p className="sm:col-span-2 rounded-md border border-[var(--nsn-soft-aqua)] bg-[var(--nsn-sage-mist)] p-3 text-sm leading-6 text-[var(--nsn-teal-dark)]">
-                These changes have already been restored. Undo is no longer
-                available for this execution.
+                {undoNeedsInspection
+                  ? "The Bridge restored its owned changes, but a folder path needs inspection. No further automatic cleanup will run."
+                  : "These changes have already been restored. Undo is no longer available for this execution."}
               </p>
             ) : (
               <>
@@ -1117,8 +1122,9 @@ function ExecutionRunPanel({
           </div>
           {undoCompleted ? (
             <p className="rounded-md border border-[var(--nsn-soft-aqua)] bg-[var(--nsn-sage-mist)] p-3 text-sm leading-6 text-[var(--nsn-teal-dark)]">
-              UNDONE. The Bridge restored the completed file and folder changes
-              from this organization.
+              {undoNeedsInspection
+                ? "UNDO COMPLETED WITH ATTENTION. Files were restored, but inspect reoccupied or unverified folder paths before declaring the directory tree restored."
+                : "UNDONE. The Bridge restored the completed file and folder changes from this organization."}
             </p>
           ) : null}
           <div className="grid gap-3">

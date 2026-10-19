@@ -351,7 +351,12 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
   const publishedPaths = new Set(files.map((file) => file.relativePath));
   const verifiedPaths = new Set<string>();
   await visiblePaths(root.actualPath, root.actualPath, verifiedPaths);
-  if (publishedPaths.size !== verifiedPaths.size ||
+  const finalRoot = await lstat(root.actualPath, { bigint: true }).catch(() => null);
+  if (!finalRoot?.isDirectory() || finalRoot.isSymbolicLink() ||
+      rootBefore.dev !== finalRoot.dev || rootBefore.ino !== finalRoot.ino ||
+      rootBefore.mtimeNs !== finalRoot.mtimeNs ||
+      rootBefore.ctimeNs !== finalRoot.ctimeNs ||
+      publishedPaths.size !== verifiedPaths.size ||
       [...verifiedPaths].some((relative) => !publishedPaths.has(relative))) {
     throw new BridgeAppError(
       "The selected folder changed or its scan inventory was incomplete. Scan it again after checking the folder.",

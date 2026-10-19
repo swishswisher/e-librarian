@@ -1800,10 +1800,13 @@ function moveAndFolderDrafts(context: SuggestionContext) {
     drafts.push(
       makeDraft(context, {
         confidence:
-          0.68 +
-          Math.min(best.directMatches.length, 4) * 0.02 +
-          (clusterSupport ? 0.04 : 0),
-        evidenceStrength: "STRONG",
+          best.rule.id === "clinical-tools" && !approvedPreference
+            ? 0.66
+            : 0.68 +
+              Math.min(best.directMatches.length, 4) * 0.02 +
+              (clusterSupport ? 0.04 : 0),
+        evidenceStrength: best.rule.id === "clinical-tools" && !approvedPreference
+          ? "SUPPORTED" : "STRONG",
         explanation: `The readable or reviewed content repeatedly supports ${matchedConcepts}. There is no established matching folder in this scan, so creating ${best.rule.folder} is presented only as a dependency of the proposed move.`,
         proposedRelativePath: normalizeBridgeRelativePath(destinationFolder),
         suggestionType: "CREATE_FOLDER",
@@ -1985,8 +1988,14 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     // destinations merely because their files share clinical vocabulary.
     const sourceScope = context.currentRelativePath.split("/").filter(Boolean);
     const targetScope = folder.split("/").filter(Boolean);
-    if (sourceScope.length >= 3 && targetScope.length >= 2 &&
-        (sourceScope[0] !== targetScope[0] || sourceScope[1] !== targetScope[1])) {
+    if (targetScope.length >= 2 &&
+        (sourceScope[0] !== targetScope[0] ||
+         (sourceScope.length >= 3 && sourceScope[1] !== targetScope[1]))) {
+      continue;
+    }
+    // Generic grouping must not move an established archive into a shallow
+    // topic folder either; file-to-file overlap does not grant relocation.
+    if (suppressBroadCategoryMove(context.currentRelativePath, folder)) {
       continue;
     }
 

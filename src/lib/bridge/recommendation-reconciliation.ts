@@ -201,11 +201,12 @@ function combineMoveAndRename(
 
   return {
     ...location,
-    confidence: Math.max(location.confidence, rename.confidence),
-    evidenceStrength: strongestEvidenceStrength(
-      location.evidenceStrength,
-      rename.evidenceStrength,
-    ),
+    // A strong filename suggestion cannot upgrade weak destination evidence.
+    // The combined action requires both independent decisions to be supported.
+    confidence: Math.min(location.confidence, rename.confidence),
+    evidenceStrength: evidenceStrengthRank(location.evidenceStrength) <=
+      evidenceStrengthRank(rename.evidenceStrength)
+      ? location.evidenceStrength : rename.evidenceStrength,
     explanation: `${location.explanation} The current filename also appears generic, so the same reviewed change can use the clearer name ${proposedFileName}.`,
     proposedFileName,
     proposedRelativePath,
