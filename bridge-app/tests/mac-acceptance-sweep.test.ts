@@ -29,7 +29,7 @@ import { reconcileRecommendationDrafts, type RecommendationDraft } from "../../s
 // All paths are disposable and outside iCloud/Documents. No private source,
 // pairing credentials, database, network service or paid AI is used.
 async function fixture(t: TestContext) {
-  const base = await mkdtemp(path.join(os.tmpdir(), "nsn-mac-native-acceptance-"));
+  const base = await mkdtemp(path.join(os.homedir(), "nsn-mac-native-acceptance-"));
   const previousData = process.env.NSN_BRIDGE_DATA_DIR;
   const previousFileSecrets = process.env.NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS;
   process.env.NSN_BRIDGE_DATA_DIR = path.join(base, "isolated-bridge-state");
