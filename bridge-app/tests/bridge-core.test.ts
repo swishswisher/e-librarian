@@ -34,6 +34,7 @@ import {
   takeBridgeWatcherEvents,
 } from "../src/watcher/watcher";
 import { defaultBridgePermissions } from "../src/permissions/defaults";
+import { effectiveBridgeHealth } from "../../src/lib/bridge/effective-health";
 import { BridgeAppError, type BridgePermissions } from "../src/types";
 
 let tempRoot: string;
@@ -179,6 +180,18 @@ describe("NSN Bridge core", () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
     }
+  });
+
+  it("does not let cloud fallback overwrite an explicitly unpaired local Bridge", () => {
+    const local = {
+      ok: false,
+      paired: false,
+      status: "BRIDGE_NOT_PAIRED" as const,
+      platform: "darwin",
+      version: "0.1.test",
+      message: "Bridge running but not paired",
+    };
+    assert.deepEqual(effectiveBridgeHealth(local, []), local);
   });
 
   it("registers a root from a selection token and consumes the token", async () => {
@@ -658,6 +671,22 @@ describe("NSN Bridge core", () => {
     assert.equal(scan.files[0].fileType, "TEXT");
     assert.equal(scan.files[0].readStatus, "SUPPORTED");
     assert.equal(scan.files[0].checksum, createHash("sha256").update("Synthetic worksheet.\\n").digest("hex"));
+  });
+
+  it("rejects a changed file inventory rather than publishing an incomplete scan", async () => {
+    const folder = await makeSafeFolder("library-inventory-race");
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "original.png"), pngMetadataFixture());
+
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async () => {
+          await writeFile(path.join(folder, "late.txt"), "New file during scanning.");
+        },
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
   });
 
   it("classifies FLAC and OGG files as supported audio during scanning", async () => {
