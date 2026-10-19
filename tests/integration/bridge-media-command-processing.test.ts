@@ -499,6 +499,57 @@ after(async () => {
   }
 });
 
+test("remote scanner refuses a truncated single-file report and accepts an exact replay", async () => {
+  const root = await createCloudBackedBridgeRoot(
+    "SCAN_INTEGRITY_SINGLE_FILE",
+    new Map([["synthetic_client_worksheet.txt", Buffer.from("Synthetic client worksheet.\\n")]]),
+  );
+  const genuineScan = await scanBridgeRoot(root.root.id);
+  assert.equal(genuineScan.totalFiles, 1);
+
+  const session = await prisma.scanSession.create({
+    data: { connectedFolderId: root.library.id, status: "SCANNING" },
+  });
+  const reportFor = (result: unknown) => ({
+    commandId: `scan-integrity-${randomUUID()}`,
+    result: bridgeJson(result),
+    safeErrorCategory: null,
+    status: "COMPLETED" as const,
+  });
+  const argumentsFor = (result: unknown) => ({
+    bridgeDeviceId: root.device.bridgeDeviceId,
+    bridgeRootId: root.root.id,
+    commandPayload: { scanSessionId: session.id },
+    connectedLibraryId: root.library.id,
+    report: reportFor(result),
+  });
+
+  await assert.rejects(
+    () => importRemoteBridgeScanReport(argumentsFor({ ...genuineScan, files: [] })),
+    /scan report totals disagree/i,
+  );
+  await assert.rejects(
+    () => importRemoteBridgeScanReport(argumentsFor({ ...genuineScan, totalFiles: 0 })),
+    /scan report totals disagree/i,
+  );
+  assert.equal((await prisma.scanSession.findUniqueOrThrow({ where: { id: session.id } })).status, "SCANNING");
+  assert.equal(await prisma.scannedFile.count({ where: { sessionId: session.id } }), 0);
+
+  const accepted = await importRemoteBridgeScanReport(argumentsFor(genuineScan));
+  assert.equal(accepted?.totalFiles, 1);
+  assert.equal(await prisma.scannedFile.count({ where: { sessionId: session.id } }), 1);
+
+  const repeated = await importRemoteBridgeScanReport(argumentsFor(genuineScan));
+  assert.equal(repeated?.alreadyImported, true);
+  assert.equal(repeated?.totalFiles, 1);
+  await assert.rejects(
+    () => importRemoteBridgeScanReport(argumentsFor({
+      ...genuineScan, files: [], supportedFiles: 0, totalFiles: 0,
+    })),
+    /different inventory replay/i,
+  );
+});
+
 test("cloud scan import queues audio reads and records checksum duplicates across roots", async () => {
   const duplicateAudio = mp3FrameBuffer(1);
   const first = await createCloudBackedBridgeRoot(
