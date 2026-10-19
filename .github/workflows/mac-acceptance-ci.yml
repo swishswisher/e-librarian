@@ -1,0 +1,66 @@
+name: Mac acceptance remediation checks
+
+on:
+  pull_request:
+    branches:
+      - release-candidate/phase-1-3
+    paths:
+      - 'bridge-app/**'
+      - 'apps/bridge/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'packages/**'
+      - 'prisma/**'
+      - 'package*.json'
+      - '.github/workflows/mac-acceptance-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate remediation (isolated DB, no deploy)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: nsn_library_machine_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/nsn_library_machine_test?schema=public
+      DIRECT_URL: postgresql://postgres:postgres@127.0.0.1:5432/nsn_library_machine_test?schema=public
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NSN_LIBRARIAN_APP_URL: http://localhost:3000
+      AUTH_SECRET: ci-auth-secret-with-at-least-thirty-two-characters
+      AUTH_GOOGLE_ID: ci-google-client-id.apps.googleusercontent.com
+      AUTH_GOOGLE_SECRET: ci-google-client-secret
+      NSN_AUTH_ALLOWED_USERS_JSON: '[{"email":"ci@example.com","googleSubject":"ci-google-subject","name":"CI User","role":"OWNER"}]'
+      NSN_BRIDGE_COMMAND_SIGNING_SECRET: ci-command-signing-secret-with-at-least-32-characters
+      NSN_BRIDGE_PAIRING_SECRET: ci-pairing-secret-with-at-least-32-characters
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: npm
+      - run: npm ci
+      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+      - run: npm run db:generate
+      - run: npm run db:validate
+      - run: npm run db:deploy
+      - run: npm run lint
+      - run: npm run test:auth
+      - run: npm run test:protocol
+      - run: npm run test:bridge
+      - run: npm run test:invariants
+      - run: npm run build:bridge
+      - run: npm run build:web
