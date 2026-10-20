@@ -14,6 +14,8 @@ import {
   getCompletePairedBridgeIdentity,
   pairBridgeWithCloud,
   sendBridgeHeartbeat,
+  fetchPendingBridgeCommands,
+  reportBridgeCommand,
   setBridgeCloudDiagnosticSinkForTests,
   setBridgeCloudFetchForTests,
 } from "../../apps/bridge/src/main/cloud-client";
@@ -223,6 +225,32 @@ describe("Bridge complete paired identity", () => {
     );
     assert.equal(diagnostics.join("\n").includes(keys.privateKey), false);
     assert.equal(diagnostics.join("\n").includes("x-nsn-bridge"), false);
+  });
+
+  it("bounds signed command polling and report transports with abortable requests", async () => {
+    const keys = createBridgeKeyPair();
+    await saveBridgeSecret("bridge-device-id", "transport-timeout-device");
+    await saveBridgeSecret("device-private-key", keys.privateKey);
+    const collected: Array<{ endpoint: string; signal?: AbortSignal | null }> = [];
+    setBridgeCloudFetchForTests(async (input, init) => {
+      collected.push({ endpoint: String(input), signal: init?.signal });
+      return new Response(JSON.stringify({ ok: true, commands: [] }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      });
+    });
+    await fetchPendingBridgeCommands();
+    await reportBridgeCommand({
+      commandId: "synthetic-report-1", status: "FAILED",
+      result: null, safeErrorCategory: "FILE_INVALID_ENCODING",
+    });
+    assert.equal(collected.length, 2);
+    assert.ok(collected[0]?.signal instanceof AbortSignal);
+    assert.ok(collected[1]?.signal instanceof AbortSignal);
+    assert.equal(collected[0]?.signal?.aborted, false);
+    assert.equal(collected[1]?.signal?.aborted, false);
+    assert.match(collected[0]!.endpoint, /commands$/);
+    assert.match(collected[1]!.endpoint, /complete$/);
   });
 
   it("classifies heartbeat network failures without exposing request details", async () => {

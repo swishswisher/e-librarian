@@ -1,6 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
-import { bridgeIdentityCanAuthenticate, getCompletePairedBridgeIdentity } from "../../../apps/bridge/src/main/cloud-client";
 
 import {
   assertBridgeExecutionAllowed,
@@ -470,7 +469,7 @@ async function handleAuthenticatedRequest(
   );
 }
 
-export function createBridgeServer() {
+export function createBridgeServer(options: { isCloudPaired?: () => Promise<boolean> } = {}) {
   return createServer((request, response) => {
     void (async () => {
       applyCors(request, response);
@@ -489,15 +488,16 @@ export function createBridgeServer() {
       validateOrigin(request);
 
       if (request.method === "GET" && requestUrl.pathname === "/bridge/v1/health") {
-        // A reachable local HTTP port is not proof of a paired cloud identity.
-        // Never disclose saved device IDs, private keys, or secret-store errors.
-        const identity = await getCompletePairedBridgeIdentity();
-        const paired = bridgeIdentityCanAuthenticate(identity);
+        // A running loopback server and a local pairing secret do not attest
+        // cloud device pairing. Never default to paired on an unpaired Bridge.
+        const paired = options.isCloudPaired
+          ? await options.isCloudPaired().catch(() => false)
+          : false;
         sendJson(request, response, 200, {
           ok: true,
           paired,
           platform: process.platform,
-          status: paired ? "BRIDGE_READY" : "BRIDGE_UNAVAILABLE",
+          status: paired ? "BRIDGE_READY" : "BRIDGE_NOT_PAIRED",
           version: bridgeVersion,
         });
         return;

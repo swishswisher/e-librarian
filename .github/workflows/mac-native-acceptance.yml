@@ -1,0 +1,50 @@
+name: Native macOS acceptance (synthetic only)
+
+on:
+  push:
+    branches:
+      - fix/mac-acceptance-issues-4-12
+    paths:
+      - '.github/workflows/mac-native-acceptance.yml'
+      - 'apps/bridge/**'
+      - 'bridge-app/**'
+      - 'src/lib/bridge/organization-suggestions.ts'
+      - 'package*.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-native-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-mac:
+    name: Intel macOS read, scan, physical Undo (synthetic)
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      OPENAI_API_KEY: ''
+      ANTHROPIC_API_KEY: ''
+      NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS: '1'
+      NSN_LIBRARIAN_APP_URL: 'http://127.0.0.1:3000'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: npm
+      - run: npm ci
+      - name: Use a disposable personal-folder temp root (not macOS system /var)
+        run: |
+          mkdir -p "$HOME/nsn-native-acceptance-tmp"
+          echo "TMPDIR=$HOME/nsn-native-acceptance-tmp" >> "$GITHUB_ENV"
+      - name: Sweep issues 6, 8, 11, and 12 against synthetic native Mac filesystem
+        run: node --test --test-concurrency=1 --import tsx bridge-app/tests/mac-acceptance-sweep.test.ts
+      - name: Verify native scanner, malformed reads and bridge health
+        run: node --test --test-concurrency=1 --import tsx bridge-app/tests/bridge-core.test.ts
+      - name: Verify journaled move and Undo under real macOS filesystem
+        run: node --test --test-concurrency=1 --import tsx bridge-app/tests/physical-recovery-invariants.test.ts bridge-app/tests/folder-cleanup-recovery.test.ts
+      - name: Verify bounded Bridge command transport and recovery
+        run: node --test --test-concurrency=1 --import tsx bridge-app/tests/bridge-cloud-identity.test.ts bridge-app/tests/command-recovery-invariants.test.ts

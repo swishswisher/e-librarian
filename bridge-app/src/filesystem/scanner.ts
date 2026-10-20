@@ -60,6 +60,13 @@ const ignoredSystemFileNames = new Set([
   "thumbs.db",
 ]);
 
+function nativeScanIdentity(stats: {
+  dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint; mode: bigint;
+}) {
+  return [stats.dev, stats.ino, stats.size, stats.mtimeNs, stats.ctimeNs, stats.mode]
+    .map(String).join(":");
+}
+
 type ScanBridgeRootOptions = {
   beforeImageChecksum?: (filePath: string) => Promise<void>;
   imageMetadataExtractor?: typeof extractImageMetadata;
@@ -160,6 +167,12 @@ async function fileDraft(
 
     if (fileType.startsWith("IMAGE_")) await beforeImageChecksum?.(filePath);
     const checksumBefore = await checksumFile(filePath);
+    const checksumStats = await lstat(filePath);
+    if (!checksumStats.isFile() || checksumStats.isSymbolicLink() ||
+        !sameFileIdentity(stats, checksumStats)) {
+      throw new BridgeAppError("This file changed during checksum inspection.",
+        "FILE_CHANGED_DURING_SCAN", 409);
+    }
     let verifiedStats = stats;
     let imageMetadata: Awaited<ReturnType<typeof extractImageMetadata>> | null = null;
     let checksumAfter = checksumBefore;
@@ -184,6 +197,13 @@ async function fileDraft(
         "FILE_CHANGED_DURING_SCAN",
         409,
       );
+    }
+
+    const finalFileStats = await lstat(filePath);
+    if (!finalFileStats.isFile() || finalFileStats.isSymbolicLink() ||
+        !sameFileIdentity(verifiedStats, finalFileStats)) {
+      throw new BridgeAppError("This file changed during the scan.",
+        "FILE_CHANGED_DURING_SCAN", 409);
     }
 
     return {
@@ -217,13 +237,19 @@ async function scanDirectory(
   rootPath: string,
   currentPath: string,
   files: BridgeScannedFileDraft[],
+  nativeIdentities: Map<string, string>,
   imageMetadataExtractor: typeof extractImageMetadata,
   beforeImageChecksum?: (filePath: string) => Promise<void>,
 ) {
   const currentStats = await lstat(currentPath);
 
   if (!currentStats.isDirectory() || currentStats.isSymbolicLink()) {
-    return;
+    // A changed/disconnected root is not a legitimately empty library.
+    throw new BridgeAppError(
+      "The folder changed while the Bridge was scanning it.",
+      "SCAN_INVENTORY_UNVERIFIED",
+      409,
+    );
   }
 
   const entries = await readdir(currentPath, { withFileTypes: true });
@@ -236,7 +262,7 @@ async function scanDirectory(
       continue;
     }
 
-    const stats = await lstat(entryPath).catch(() => null);
+    const stats = await lstat(entryPath, { bigint: true }).catch(() => null);
 
     if (!stats) {
       files.push({
@@ -252,6 +278,8 @@ async function scanDirectory(
       });
       continue;
     }
+
+    nativeIdentities.set(relativePath, nativeScanIdentity(stats));
 
     if (stats.isSymbolicLink()) {
       files.push({
@@ -269,7 +297,7 @@ async function scanDirectory(
     }
 
     if (stats.isDirectory()) {
-      await scanDirectory(rootId, rootPath, entryPath, files, imageMetadataExtractor, beforeImageChecksum);
+      await scanDirectory(rootId, rootPath, entryPath, files, nativeIdentities, imageMetadataExtractor, beforeImageChecksum);
       continue;
     }
 
@@ -279,40 +307,30 @@ async function scanDirectory(
   }
 }
 
-// A complete scan is an exhaustive inventory, not just a successful walk.
-// A second read-only directory enumeration detects a root which appeared empty
-// during discovery but has discoverable files before the result is committed.
-// It also prevents partial inventories from being published as complete when
-// a folder changes during the walk. No file contents are read in this pass.
-async function assertCompleteInventory(rootPath: string, files: BridgeScannedFileDraft[]) {
-  const recorded = new Set(files.map((file) => pathKey(file.relativePath)));
-  const actual = new Set<string>();
-  async function collect(folder: string): Promise<void> {
-    const entries = await readdir(folder, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(folder, entry.name);
-      const relativePath = relativePathFor(rootPath, fullPath);
-      if (shouldIgnore(relativePath)) continue;
-      const stat = await lstat(fullPath).catch(() => null);
-      if (!stat) {
-        throw new BridgeAppError(
-          "A file changed during this scan. Scan the connected folder again.",
-          "SCAN_INVENTORY_INCOMPLETE", 409,
-        );
-      }
-      if (stat.isDirectory() && !stat.isSymbolicLink()) {
-        await collect(fullPath);
-      } else if (stat.isFile() || stat.isSymbolicLink()) {
-        actual.add(pathKey(relativePath));
-      }
+// Re-enumerate names after collecting metadata. A changed directory listing
+// must never be published as a complete snapshot (including a false empty scan).
+// This is intentionally a names-only pass: no second content upload or checksum.
+async function visiblePaths(
+  rootPath: string, directory: string, paths: Set<string>,
+  nativeIdentities: Map<string, string>,
+) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const absolute = path.join(directory, entry.name);
+    const relative = relativePathFor(rootPath, absolute);
+    if (shouldIgnore(relative)) continue;
+    const verified = await lstat(absolute, { bigint: true }).catch(() => null);
+    if (!verified || nativeIdentities.get(relative) !== nativeScanIdentity(verified)) {
+      throw new BridgeAppError(
+        "A file or directory changed identity while scanning the connected folder.",
+        "SCAN_INVENTORY_UNVERIFIED", 409,
+      );
     }
-  }
-  await collect(rootPath);
-  if (actual.size !== recorded.size || [...actual].some((relative) => !recorded.has(relative))) {
-    throw new BridgeAppError(
-      "The file inventory changed or was incomplete during this scan. Scan the connected folder again.",
-      "SCAN_INVENTORY_INCOMPLETE", 409,
-    );
+    if (verified.isDirectory() && !verified.isSymbolicLink()) {
+      await visiblePaths(rootPath, absolute, paths, nativeIdentities);
+    } else if (verified.isFile() || verified.isSymbolicLink()) {
+      paths.add(relative);
+    }
   }
 }
 
@@ -326,6 +344,15 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
   const root = await requireRootPermission(rootId, "readPermission", "scan files");
   const startedAt = new Date();
   const files: BridgeScannedFileDraft[] = [];
+  const nativeIdentities = new Map<string, string>();
+  const rootBefore = await lstat(root.actualPath, { bigint: true }).catch(() => null);
+  if (!rootBefore?.isDirectory() || rootBefore.isSymbolicLink()) {
+    throw new BridgeAppError(
+      "The connected folder is missing or is no longer a regular directory.",
+      "ROOT_UNAVAILABLE",
+      422,
+    );
+  }
 
   if (!isPathInsideRoot(path.dirname(root.actualPath), root.actualPath)) {
     throw new BridgeAppError(
@@ -340,11 +367,38 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
     root.actualPath,
     root.actualPath,
     files,
+    nativeIdentities,
     options.imageMetadataExtractor ?? extractImageMetadata,
     options.beforeImageChecksum,
   );
 
-  await assertCompleteInventory(root.actualPath, files);
+  const rootAfter = await lstat(root.actualPath, { bigint: true }).catch(() => null);
+  if (!rootAfter?.isDirectory() || rootAfter.isSymbolicLink() ||
+      rootBefore.dev !== rootAfter.dev || rootBefore.ino !== rootAfter.ino ||
+      rootBefore.mtimeNs !== rootAfter.mtimeNs || rootBefore.ctimeNs !== rootAfter.ctimeNs) {
+    throw new BridgeAppError(
+      "The connected folder changed while the inventory was being verified.",
+      "SCAN_INVENTORY_UNVERIFIED",
+      409,
+    );
+  }
+
+  const publishedPaths = new Set(files.map((file) => file.relativePath));
+  const verifiedPaths = new Set<string>();
+  await visiblePaths(root.actualPath, root.actualPath, verifiedPaths, nativeIdentities);
+  const finalRoot = await lstat(root.actualPath, { bigint: true }).catch(() => null);
+  if (!finalRoot?.isDirectory() || finalRoot.isSymbolicLink() ||
+      rootBefore.dev !== finalRoot.dev || rootBefore.ino !== finalRoot.ino ||
+      rootBefore.mtimeNs !== finalRoot.mtimeNs ||
+      rootBefore.ctimeNs !== finalRoot.ctimeNs ||
+      publishedPaths.size !== verifiedPaths.size ||
+      [...verifiedPaths].some((relative) => !publishedPaths.has(relative))) {
+    throw new BridgeAppError(
+      "The selected folder changed or its scan inventory was incomplete. Scan it again after checking the folder.",
+      "SCAN_INVENTORY_UNVERIFIED",
+      409,
+    );
+  }
 
   const completedAt = new Date();
   const supportedFiles = files.filter((file) => file.readStatus === "SUPPORTED").length;

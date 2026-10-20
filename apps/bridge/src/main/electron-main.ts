@@ -86,7 +86,10 @@ async function startLocalBridgeServer() {
     return localServer;
   }
 
-  localServer = createBridgeServer();
+  localServer = createBridgeServer({
+    isCloudPaired: async () =>
+      bridgeIdentityCanAuthenticate(await getCompletePairedBridgeIdentity()),
+  });
   await new Promise<void>((resolve) => {
     localServer?.listen(
       Number(process.env.NSN_BRIDGE_PORT ?? 4777),

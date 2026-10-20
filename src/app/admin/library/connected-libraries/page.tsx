@@ -4,8 +4,9 @@ import { NsnPageHeader } from "@/components/library/NsnPageHeader";
 import { getBridgeCloudStatus } from "@/lib/bridge/cloud-coordinator";
 import { applyCloudBridgeReachability } from "@/lib/bridge/cloud-library-reachability";
 import { getConnectedLibraries } from "@/lib/bridge/connected-libraries";
-import { cloudBridgeHealth } from "@/lib/bridge/effective-health";
+import { effectiveBridgeHealth } from "@/lib/bridge/effective-health";
 import { getLocalBridgeHealth } from "@/lib/bridge/local-bridge-client";
+import { latestBridgeScanProgressByConnectedLibrary } from "@/lib/bridge/scan-sessions";
 
 export const dynamic = "force-dynamic";
 
@@ -22,9 +23,10 @@ export default async function ConnectedLibrariesPage() {
     storedLibraries,
     cloudStatus.devices,
   );
-  const bridgeHealth = localBridgeHealth.ok
-    ? localBridgeHealth
-    : cloudBridgeHealth(cloudStatus.devices);
+  const bridgeHealth = effectiveBridgeHealth(localBridgeHealth, cloudStatus.devices);
+  const latestScanProgressByLibraryId = await latestBridgeScanProgressByConnectedLibrary(
+    libraries.map((library) => library.id),
+  );
   const connectedCount = libraries.filter(
     (library) =>
       library.bridgeReachable &&
@@ -72,6 +74,7 @@ export default async function ConnectedLibrariesPage() {
         <ConnectedLibrariesLiveView
           initialBridgeHealth={bridgeHealth}
           initialLibraries={libraries}
+          latestScanProgressByLibraryId={latestScanProgressByLibraryId}
         />
       </div>
     </LibraryShell>

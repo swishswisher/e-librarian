@@ -41,10 +41,11 @@ const readableExtensions = new Set([
   ...videoExtensions,
 ]);
 
-async function sourceChecksum(filePath: string) {
+async function sourceChecksum(filePath: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const hash = createHash("sha256");
 
-  for await (const chunk of createReadStream(filePath)) {
+  for await (const chunk of createReadStream(filePath, { signal })) {
     hash.update(chunk);
   }
 
@@ -328,51 +329,39 @@ async function extractVideoReview(
   } satisfies BridgeReadResult;
 }
 
-async function strictUtf8Text(filePath: string) {
-  const bytes = await readFile(filePath);
+async function readStrictUtf8(filePath: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  let bytes: Buffer;
   try {
-    // Buffer.toString("utf8") silently invents replacement characters for
-    // corrupt source bytes; never treat them as document evidence.
+    bytes = await readFile(filePath, { signal });
+  } catch {
+    signal?.throwIfAborted();
+    throw new BridgeAppError("This file could not be read safely.", "FILE_UNREADABLE", 422);
+  }
+  try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     throw new BridgeAppError(
-      "This text file contains invalid UTF-8 and could not be read safely.",
-      "TEXT_DECODE_FAILED", 422,
+      "This text file contains invalid UTF-8 bytes and needs a different encoding or a corrected copy.",
+      "FILE_INVALID_ENCODING",
+      422,
     );
   }
 }
 
-async function extractText(filePath: string, extension: string) {
+async function extractText(filePath: string, extension: string, signal?: AbortSignal) {
   if (extension === ".txt" || extension === ".md" || extension === ".markdown") {
-    try {
-      return {
-        text: await strictUtf8Text(filePath),
-        warnings: [] as string[],
-      };
-    } catch (error) {
-      if (error instanceof BridgeAppError) throw error;
-      throw new BridgeAppError(
-        "This file could not be read safely.",
-        "FILE_UNREADABLE",
-        422,
-      );
-    }
+    return {
+      text: await readStrictUtf8(filePath, signal),
+      warnings: [] as string[],
+    };
   }
 
   if (extension === ".html" || extension === ".htm") {
-    try {
-      return {
-        text: htmlToText(await strictUtf8Text(filePath)),
-        warnings: [] as string[],
-      };
-    } catch (error) {
-      if (error instanceof BridgeAppError) throw error;
-      throw new BridgeAppError(
-        "This file could not be read safely.",
-        "FILE_UNREADABLE",
-        422,
-      );
-    }
+    return {
+      text: htmlToText(await readStrictUtf8(filePath, signal)),
+      warnings: [] as string[],
+    };
   }
 
   if (extension === ".pdf") {
@@ -445,8 +434,12 @@ async function extractText(filePath: string, extension: string) {
 export async function readBridgeRootFile(
   rootId: string,
   relativePath: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<BridgeReadResult> {
+  const signal = options.signal;
+  signal?.throwIfAborted();
   const safeFile = await resolveBridgeRootFile(rootId, relativePath);
+  signal?.throwIfAborted();
   const extension = path.posix.extname(safeFile.relativePath).toLowerCase();
   const imageFileType = supportedImageFileTypeForPath(safeFile.relativePath);
 
@@ -460,12 +453,12 @@ export async function readBridgeRootFile(
 
   if (imageFileType) {
     try {
-      const checksumBefore = await sourceChecksum(safeFile.localPath);
+      const checksumBefore = await sourceChecksum(safeFile.localPath, signal);
       const metadata = await extractImageMetadata(
         safeFile.localPath,
         safeFile.relativePath,
       );
-      const checksumAfter = await sourceChecksum(safeFile.localPath);
+      const checksumAfter = await sourceChecksum(safeFile.localPath, signal);
       if (checksumBefore !== checksumAfter) {
         throw new BridgeAppError(
           "This image changed while it was being read. Scan it again before examining it.",
@@ -505,7 +498,7 @@ export async function readBridgeRootFile(
   }
 
   if (audioExtensions.has(extension)) {
-    const checksumBefore = await sourceChecksum(safeFile.localPath);
+    const checksumBefore = await sourceChecksum(safeFile.localPath, signal);
     const header = await readHeader(safeFile.localPath, safeFile.sizeBytes);
 
     if (!isValidAudioHeader(extension, header)) {
@@ -521,7 +514,7 @@ export async function readBridgeRootFile(
       safeFile.relativePath,
       safeFile.fileName,
     );
-    const checksumAfter = await sourceChecksum(safeFile.localPath);
+    const checksumAfter = await sourceChecksum(safeFile.localPath, signal);
     if (checksumBefore !== checksumAfter) {
       throw new BridgeAppError("This audio file changed while it was being read. Scan it again before examining it.", "FILE_CHANGED_DURING_READ", 409);
     }
@@ -529,7 +522,7 @@ export async function readBridgeRootFile(
   }
 
   if (videoExtensions.has(extension)) {
-    const checksumBefore = await sourceChecksum(safeFile.localPath);
+    const checksumBefore = await sourceChecksum(safeFile.localPath, signal);
     const header = await readHeader(safeFile.localPath, safeFile.sizeBytes);
 
     if (!isValidVideoHeader(extension, header)) {
@@ -545,16 +538,16 @@ export async function readBridgeRootFile(
       safeFile.relativePath,
       safeFile.fileName,
     );
-    const checksumAfter = await sourceChecksum(safeFile.localPath);
+    const checksumAfter = await sourceChecksum(safeFile.localPath, signal);
     if (checksumBefore !== checksumAfter) {
       throw new BridgeAppError("This video file changed while it was being read. Scan it again before examining it.", "FILE_CHANGED_DURING_READ", 409);
     }
     return { ...result, sourceChecksum: checksumAfter };
   }
 
-  const checksumBefore = await sourceChecksum(safeFile.localPath);
-  const result = await extractText(safeFile.localPath, extension);
-  const checksumAfter = await sourceChecksum(safeFile.localPath);
+  const checksumBefore = await sourceChecksum(safeFile.localPath, signal);
+  const result = await extractText(safeFile.localPath, extension, signal);
+  const checksumAfter = await sourceChecksum(safeFile.localPath, signal);
 
   if (checksumBefore !== checksumAfter) {
     throw new BridgeAppError(
@@ -563,6 +556,7 @@ export async function readBridgeRootFile(
       409,
     );
   }
+  signal?.throwIfAborted();
   const extractedText = result.text.trim();
 
   if (!extractedText) {

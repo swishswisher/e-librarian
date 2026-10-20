@@ -7,6 +7,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { moveWithoutReplacement, physicalFileIdentity, samePhysicalIdentity, usablePhysicalIdentity } from "../src/filesystem/safe-move";
 import { journaledMove, journaledCreateFolder, journaledRemoveFolder, recoverPhysicalAction } from "../src/filesystem/physical-journal";
+import { inspectUndoFolderName } from "../src/filesystem/operations";
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "nsn-physical-invariant-"));
@@ -84,25 +85,6 @@ test("RECOVER-1 journal preserves a completed filesystem effect across caller pe
   ]) await assert.rejects(recoverPhysicalAction("synthetic-database-gap", binding), /authority/);
   assert.equal(await readFile(f.destination, "utf8"), f.bytes);
 });
-test("RECOVER-1 completed folder Undo never removes externally recreated names or empty .nsn-move captures", async (t) => {
-  const f = await fixture(t);
-  const directory = path.join(f.directory, "approved-temp");
-  const created = await journaledCreateFolder("recreated-folder-original", directory);
-  assert.equal(created.created, true);
-  const removed = await journaledRemoveFolder("recreated-folder-undo", "recreated-folder-original", directory);
-  assert.equal(removed.state, "COMPLETED");
-  await assert.rejects(lstat(directory), { code: "ENOENT" });
-
-  await mkdir(directory);
-  const unrelated = path.join(directory, ".nsn-move-recreated");
-  await mkdir(unrelated);
-  const current = await lstat(directory, { bigint: true });
-  assert.notEqual(current.ino.toString(), created.identity?.ino);
-  assert.equal((await recoverPhysicalAction("recreated-folder-undo"))?.state, "COMPLETED");
-  assert.equal((await lstat(directory, { bigint: true })).ino, current.ino);
-  assert.deepEqual(await readdir(unrelated), []);
-});
-
 test("FILE-1 Undo removes only the empty directory owned by the original execution", async (t) => {
   const f = await fixture(t), folder = path.join(f.directory, "created");
   await journaledCreateFolder("synthetic-folder-owner", folder);
@@ -179,6 +161,19 @@ test("RECOVER-1 safe legacy identities still recover owned moves; new journals p
   assert.deepEqual(await journaledRemoveFolder("exact-undo", "exact-folder", folder), await recoverPhysicalAction("exact-undo"));
 });
 
+test("UNDO-1 preserved replacement after completed folder removal is visibly detectable", async t => {
+  const f = await fixture(t);
+  const folder = path.join(f.directory, "removal-target");
+  await journaledCreateFolder("original-folder-owner", folder);
+  await journaledRemoveFolder("undo-folder-owner", "original-folder-owner", folder);
+  assert.equal(await inspectUndoFolderName(f.directory, "removal-target"), "ABSENT");
+  await mkdir(folder);
+  await mkdir(path.join(folder, ".nsn-move-restored"));
+  assert.equal(await inspectUndoFolderName(f.directory, "removal-target"), "REOCCUPIED");
+  assert.equal((await recoverPhysicalAction("undo-folder-owner"))?.state, "COMPLETED");
+  assert.deepEqual(await readdir(folder), [".nsn-move-restored"]);
+});
+
 test("FILE-1 folder replacement between verification and capture is retained unresolved, never deleted", async (t) => {
   const f = await fixture(t), folder = path.join(f.directory, "approved-folder"), retained = path.join(f.directory, "original-retained");
   await journaledCreateFolder("folder-race-original", folder);
@@ -187,15 +182,33 @@ test("FILE-1 folder replacement between verification and capture is retained unr
     await rename(folder, retained); await mkdir(folder);
     replacement = (await lstat(folder, { bigint: true })).ino;
     await writeFile(path.join(folder, "unapproved.txt"), "Unrelated contents must survive");
-  }), /not the empty directory owned/);
+  }), /not the directory owned/);
   const capture = (await readdir(f.directory)).find(name => name.startsWith(".nsn-remove-")); assert.ok(capture);
   assert.equal((await lstat(path.join(f.directory, capture, "directory"), { bigint: true })).ino, replacement);
   assert.equal(await readFile(path.join(f.directory, capture, "directory", "unapproved.txt"), "utf8"), "Unrelated contents must survive");
   assert.ok((await lstat(retained)).isDirectory());
-  await mkdir(folder); await writeFile(path.join(folder, "later.txt"), "A later public replacement");
-  await assert.rejects(recoverPhysicalAction("folder-race-undo"), /not the empty directory owned/);
+  assert.equal(await readFile(path.join(folder, "unapproved.txt"), "utf8"),
+    "Unrelated contents must survive", "The foreign directory must remain visible at its public name.");
+  await writeFile(path.join(folder, "later.txt"), "A later public replacement");
+  await assert.rejects(recoverPhysicalAction("folder-race-undo"), /not the directory owned/);
   assert.equal(await readFile(path.join(folder, "later.txt"), "utf8"), "A later public replacement");
   assert.equal(await readFile(path.join(f.directory, capture, "directory", "unapproved.txt"), "utf8"), "Unrelated contents must survive");
+});
+
+test("FILE-1 an empty unrelated folder raced into Undo is restored to its public name", async t => {
+  const f = await fixture(t), folder = path.join(f.directory, "empty-replacement"),
+    original = path.join(f.directory, "retained-approved-folder");
+  await journaledCreateFolder("owner-raced-empty", folder);
+  await assert.rejects(journaledRemoveFolder("undo-raced-empty", "owner-raced-empty", folder,
+    async () => { await rename(folder, original); await mkdir(folder); }),
+    /not the directory owned/);
+  assert.equal((await lstat(folder)).isDirectory(), true);
+  assert.deepEqual(await readdir(folder), []);
+  const captured = (await readdir(f.directory)).find(name => name.startsWith(".nsn-remove-"));
+  assert.ok(captured, "The original raced directory must be preserved for inspection.");
+  assert.equal((await lstat(path.join(f.directory, captured, "directory"))).isDirectory(), true);
+  await assert.rejects(recoverPhysicalAction("undo-raced-empty"), /not the directory owned/);
+  assert.equal((await lstat(folder)).isDirectory(), true);
 });
 
 test("RECOVER-1 captured folder Undo recovers only its exact private owner and preserves a new public name", async (t) => {

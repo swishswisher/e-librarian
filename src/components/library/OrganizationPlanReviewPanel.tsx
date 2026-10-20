@@ -28,7 +28,7 @@ import type {
 import {
   actionCanBeChosen,
   chooseActionForSource,
-  completedExecutionActionCounts,
+  historicalExecutionActionCounts,
   organizationPlanDownload,
   organizationPlanDecisionGroups,
   organizationPlanLiveSummary,
@@ -447,6 +447,12 @@ function undoActionTypeLabel(actionType: string) {
 }
 
 function safeErrorLabel(errorCategory: string) {
+  if (errorCategory === "UNDO_FOLDER_NAME_REOCCUPIED") {
+    return "The owned folder was removed, but another item now occupies the path. The Bridge preserved it; inspect before cleanup.";
+  }
+  if (errorCategory === "UNDO_FOLDER_POSTCONDITION_UNVERIFIED") {
+    return "The Bridge removed its owned folder, but could not verify its current path. Inspect before cleanup.";
+  }
   if (errorCategory === "COMMAND_RECOVERY_REQUIRED" || errorCategory.startsWith("PHYSICAL_ACTION_STARTED:")) {
     return "The Bridge cannot yet verify this filesystem outcome. Recovery or inspection is required before another operation.";
   }
@@ -930,6 +936,9 @@ function UndoPreviewPanel({ preview }: { preview: BridgeUndoPreview }) {
 }
 
 function UndoRunPanel({ run }: { run: BridgeUndoRunSummary }) {
+  const folderWarnings = run.actions.filter(a =>
+    a.safeErrorCategory === "UNDO_FOLDER_NAME_REOCCUPIED" ||
+    a.safeErrorCategory === "UNDO_FOLDER_POSTCONDITION_UNVERIFIED");
   const skippedActions = run.actions.filter(
     (action) => action.status === "PENDING",
   ).length;
@@ -959,6 +968,11 @@ function UndoRunPanel({ run }: { run: BridgeUndoRunSummary }) {
           <p>{safeErrorLabel(run.safeErrorCategory)}</p>
         ) : null}
       </div>
+      {folderWarnings.length ? (
+        <p role="alert" className="rounded-md border border-[var(--nsn-warm-beige)] bg-[var(--nsn-sand)] p-3 text-sm leading-6 text-[var(--nsn-warning)]">
+          A folder name reappeared or could not be verified after Undo. The Bridge preserved its new occupant. Inspect the path before cleanup.
+        </p>
+      ) : null}
       <div className="grid gap-3">
         {run.actions.map((action) => (
           <div
@@ -1018,6 +1032,10 @@ function ExecutionRunPanel({
     (action) => action.status === "COMPLETED",
   ).length;
   const undoCompleted = latestUndoRun?.status === "COMPLETED";
+  const undoNeedsInspection = Boolean(latestUndoRun?.actions.some((action) =>
+    action.safeErrorCategory === "UNDO_FOLDER_NAME_REOCCUPIED" ||
+    action.safeErrorCategory === "UNDO_FOLDER_POSTCONDITION_UNVERIFIED",
+  ));
   const undoRunning = latestUndoRun?.status === "RUNNING";
   const canRequestUndo =
     (run.status === "COMPLETED" || run.status === "PARTIALLY_COMPLETED") &&
@@ -1077,8 +1095,9 @@ function ExecutionRunPanel({
             </NsnButton>
             {undoCompleted ? (
               <p className="sm:col-span-2 rounded-md border border-[var(--nsn-soft-aqua)] bg-[var(--nsn-sage-mist)] p-3 text-sm leading-6 text-[var(--nsn-teal-dark)]">
-                These changes have already been restored. Undo is no longer
-                available for this execution.
+                {undoNeedsInspection
+                  ? "The Bridge restored its owned changes, but a folder path needs inspection. No further automatic cleanup will run."
+                  : "These changes have already been restored. Undo is no longer available for this execution."}
               </p>
             ) : (
               <>
@@ -1103,8 +1122,9 @@ function ExecutionRunPanel({
           </div>
           {undoCompleted ? (
             <p className="rounded-md border border-[var(--nsn-soft-aqua)] bg-[var(--nsn-sage-mist)] p-3 text-sm leading-6 text-[var(--nsn-teal-dark)]">
-              UNDONE. The Bridge restored the completed file and folder changes
-              from this organization.
+              {undoNeedsInspection
+                ? "UNDO COMPLETED WITH ATTENTION. Files were restored, but inspect reoccupied or unverified folder paths before declaring the directory tree restored."
+                : "UNDONE. The Bridge restored the completed file and folder changes from this organization."}
             </p>
           ) : null}
           <div className="grid gap-3">
@@ -1722,19 +1742,21 @@ export function OrganizationPlanReviewPanel({
       organizationPlanLiveSummary(currentPlan.actions, selectedActionIds),
     [currentPlan.actions, selectedActionIds],
   );
+  // Historical counts must come from the durable execution record, not from
+  // recalculated prospective folder dependencies or the current plan selection.
+  const historicSummary = executionRun
+    ? historicalExecutionActionCounts(executionRun.actions)
+    : null;
   const visibleUndoRun = undoRun ?? executionRun?.latestUndoRun ?? null;
   const planUiState = organizationPlanUiState({
     executionStatus: executionRun?.status,
     planStatus: currentPlan.status,
     undoStatus: visibleUndoRun?.status,
   });
-  const historicalSummary = {
-    ...liveSummary,
-    ...completedExecutionActionCounts(executionRun?.actions ?? []),
-  };
-  const safetySummary = (planUiState === "COMPLETED" || planUiState === "UNDONE") && executionRun
-    ? historicalSummary
-    : liveSummary;
+  const displayedSummary =
+    (planUiState === "COMPLETED" || planUiState === "UNDONE") && historicSummary
+      ? { ...liveSummary, ...historicSummary }
+      : liveSummary;
   const executionLifecycleLocked =
     planUiState === "EXECUTING" ||
     planUiState === "COMPLETED" ||
@@ -1818,31 +1840,31 @@ export function OrganizationPlanReviewPanel({
             </div>
             <ul className="grid min-w-0 gap-2 text-sm text-[var(--nsn-slate)] sm:grid-cols-2 xl:grid-cols-5">
                <li>
-                 {counted(safetySummary.filesMoved, "file")} {planUiState === "UNDONE"
+                 {counted(displayedSummary.filesMoved, "file")} {planUiState === "UNDONE"
                    ? "moved during execution and restored"
                    : planUiState === "COMPLETED"
                      ? "moved during execution"
                      : "will move"}
                </li>
                <li>
-                {counted(safetySummary.foldersCreated, "folder")} {planUiState === "UNDONE"
+                {counted(displayedSummary.foldersCreated, "folder")} {planUiState === "UNDONE"
                   ? "created during execution and are historical"
                   : planUiState === "COMPLETED"
                     ? "created during execution"
                     : "will be created"}
                </li>
                <li>
-                {counted(safetySummary.filesRenamed, "file")} {planUiState === "UNDONE"
+                {counted(displayedSummary.filesRenamed, "file")} {planUiState === "UNDONE"
                   ? "renamed during execution and restored"
                   : planUiState === "COMPLETED"
                     ? "renamed during execution"
                     : "will be renamed"}
                </li>
                <li>
-                {counted(safetySummary.filesDeleted, "file")} would be deleted
+                {counted(displayedSummary.filesDeleted, "file")} would be deleted
                </li>
                <li>
-                {counted(safetySummary.filesOverwritten, "file")} would be overwritten
+                {counted(displayedSummary.filesOverwritten, "file")} would be overwritten
                </li>
             </ul>
           </div>

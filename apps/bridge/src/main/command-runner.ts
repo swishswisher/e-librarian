@@ -51,6 +51,41 @@ import {
 } from "./command-outbox";
 import { readBridgeSecret, saveBridgeSecret } from "./keychain";
 
+const temporaryReadDeadlineMs = 90_000;
+// Only cancellable native text reads have a deadline here. PDF, DOCX and
+// media use their existing processing paths: a Promise.race timeout must never
+// abandon an uninterruptible parser or a child process in the background.
+// Physical execution and Undo follow durable journals, not timers.
+export async function withBoundedTemporaryRead<T>(
+  task: (signal: AbortSignal) => Promise<T>,
+  deadlineMs = temporaryReadDeadlineMs,
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new BridgeAppError(
+        "The temporary read exceeded its safe deadline.",
+        "READ_COMMAND_TIMEOUT", 504,
+      ));
+    }, deadlineMs);
+  });
+  try {
+    return await Promise.race([task(controller.signal), deadline]);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new BridgeAppError(
+        "The temporary read exceeded its safe deadline.",
+        "READ_COMMAND_TIMEOUT", 504,
+      );
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const replayCacheSecret = "processed-command-replay-keys";
 const replayCacheLimit = 500;
 const privatePathKeys = new Set(["actualPath", "localPath", "rootPath"]);
@@ -312,11 +347,16 @@ async function executeCommand(
       return resumeBridgeWatcher(requiredRootId(command));
     case "STOP_WATCHING":
       return stopBridgeWatcher(requiredRootId(command));
-    case "READ_FILE_TEMPORARILY":
-      return readBridgeRootFile(
-        requiredRootId(command),
-        typeof payload.relativePath === "string" ? payload.relativePath : "",
-      );
+    case "READ_FILE_TEMPORARILY": {
+      const rootId = requiredRootId(command);
+      const relativePath = typeof payload.relativePath === "string" ? payload.relativePath : "";
+      // The bounded path passes cancellation into streaming checksums and
+      // text reads; non-cancellable media/PDF parsers are never detached.
+      return /\.(?:txt|md|markdown|html|htm)$/iu.test(relativePath)
+        ? withBoundedTemporaryRead((signal) =>
+            readBridgeRootFile(rootId, relativePath, { signal }))
+        : readBridgeRootFile(rootId, relativePath);
+    }
     case "PREVIEW_EXECUTION":
       return previewBridgeExecution(
         requiredRootId(command),

@@ -49,6 +49,12 @@ type BridgeCloudDiagnosticDetails = {
   stage: BridgeCloudDiagnosticStage;
   status?: number;
 };
+// A stalled HTTP request must never monopolize the serialized native command
+// runner for the full ten-minute command lifetime. Scan imports may legitimately
+// need the server's 120-second transaction budget; smaller commands do not.
+const ordinaryCloudRequestTimeoutMs = 45_000;
+const scanReportCloudRequestTimeoutMs = 150_000;
+
 type BridgeFetch = (
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -481,6 +487,11 @@ async function postJson<T>(
       body: bodyText,
       headers,
       method: "POST",
+      signal: AbortSignal.timeout(
+        pathName.endsWith("/complete")
+          ? scanReportCloudRequestTimeoutMs
+          : ordinaryCloudRequestTimeoutMs,
+      ),
     });
   } catch {
     logCloudDiagnostic(options.diagnosticOperation, {
@@ -690,6 +701,7 @@ export async function fetchPendingBridgeCommands() {
     response = await bridgeFetch(`${appUrl()}${pathName}`, {
       headers,
       method: "GET",
+      signal: AbortSignal.timeout(ordinaryCloudRequestTimeoutMs),
     });
   } catch {
     logCloudDiagnostic("commands", {

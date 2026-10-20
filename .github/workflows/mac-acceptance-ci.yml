@@ -1,0 +1,104 @@
+name: Mac acceptance remediation checks
+
+on:
+  push:
+    branches:
+      - fix/mac-acceptance-issues-4-12
+  pull_request:
+    branches:
+      - release-candidate/phase-1-3
+    paths:
+      - 'bridge-app/**'
+      - 'apps/bridge/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'packages/**'
+      - 'prisma/**'
+      - 'package*.json'
+      - '.github/workflows/mac-acceptance-ci.yml'
+
+# Keep the isolated acceptance gate on the newest repair head only.
+concurrency:
+  group: mac-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate remediation (isolated DB, no deploy)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: nsn_library_machine_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/nsn_library_machine_test?schema=public
+      DIRECT_URL: postgresql://postgres:postgres@127.0.0.1:5432/nsn_library_machine_test?schema=public
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NSN_LIBRARIAN_APP_URL: http://localhost:3000
+      AUTH_SECRET: ci-auth-secret-with-at-least-thirty-two-characters
+      AUTH_GOOGLE_ID: ci-google-client-id.apps.googleusercontent.com
+      AUTH_GOOGLE_SECRET: ci-google-client-secret
+      NSN_AUTH_ALLOWED_USERS_JSON: '[{"email":"ci@example.com","googleSubject":"ci-google-subject","name":"CI User","role":"OWNER"}]'
+      NSN_BRIDGE_COMMAND_SIGNING_SECRET: ci-command-signing-secret-with-at-least-32-characters
+      NSN_BRIDGE_PAIRING_SECRET: ci-pairing-secret-with-at-least-32-characters
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: npm
+      - run: npm ci
+      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+      - run: npm run db:generate
+      - run: npm run db:validate
+      - run: npm run db:deploy
+      - run: npm run lint
+      - run: npm run test:auth
+      - run: npm run test:protocol
+      - run: npm run test:bridge
+      - run: npm run test:invariants
+      - run: npm run build:bridge
+      - run: npm run build:web
+
+  mac-native-sweep:
+    name: Intel Mac synthetic filesystem & Bridge packaging (no deploy)
+    runs-on: macos-15-intel
+    timeout-minutes: 40
+    env:
+      OPENAI_API_KEY: ''
+      ANTHROPIC_API_KEY: ''
+      NSN_BRIDGE_FORCE_FILE_SECRETS_FOR_TESTS: '1'
+      NSN_LIBRARIAN_APP_URL: http://127.0.0.1:3000
+      NSN_BRIDGE_ARCH: x64
+      NSN_UNSIGNED_BUILD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+      - name: Run read-only and explicitly synthetic native acceptance
+        run: node --import tsx --test --test-concurrency=1 bridge-app/tests/mac-acceptance-sweep.test.ts
+      - name: Typecheck Bridge
+        run: npm run build:bridge
+      - name: Package unsigned local-only Intel test DMG
+        run: npm run package:bridge:mac
+      - name: Verify unsigned test artifact without uploading/publishing it
+        run: |
+          test -f apps/bridge/dist/release/latest-mac.json
+          node -e 'const m=require("./apps/bridge/dist/release/latest-mac.json"); if(m.signed || m.channel!=="development" || m.files.length!==1 || !m.files[0].includes("mac-x64")) process.exit(1);'

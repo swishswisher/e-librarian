@@ -11,23 +11,29 @@ type Counts = { filesRead: number; filesExamined: number; filesProcessed: number
 // progress must not transfer full file rows, media, and observation history.
 export async function scanProgressCounts(sessionId: string): Promise<Counts> {
   const [row] = await getPrismaClient().$queryRaw<Counts[]>(Prisma.sql`
+    -- An examined file is processed even without a proposal. A terminal file
+    -- whose prior proposals were invalidated or belong to another generation
+    -- is *not* settled until a current recommendation batch runs again.
     WITH suggestions AS (
-      SELECT "scannedFileId", count(*)::integer AS total,
-        count(*) FILTER (WHERE status = 'PENDING')::integer AS pending
+      SELECT "scannedFileId",
+        count(*) FILTER (WHERE "invalidatedAt" IS NULL AND "recommendationGenerationVersion" = ${currentRecommendationGenerationVersion})::integer AS total,
+        count(*) FILTER (WHERE status = 'PENDING' AND "invalidatedAt" IS NULL AND "recommendationGenerationVersion" = ${currentRecommendationGenerationVersion})::integer AS pending,
+        count(*)::integer AS historical
       FROM "OrganizationSuggestion" WHERE "scanSessionId" = ${sessionId}
-        AND "invalidatedAt" IS NULL AND "recommendationGenerationVersion" = ${currentRecommendationGenerationVersion}
       GROUP BY "scannedFileId"
     ), files AS (
       SELECT f.*, coalesce(s.total, 0) AS suggestions, coalesce(s.pending, 0) AS pending,
+        coalesce(s.historical, 0) AS historical,
         (f."processingStage" = 'FAILED' OR f."readStatus" = 'FAILED' OR f."readingStatus" = 'FAILED' OR f."extractionStatus" = 'FAILED') AS failed,
         (f."fileType" !~ '^(IMAGE|AUDIO|VIDEO)_' AND f."readStatus" = 'SUPPORTED') AS document
       FROM "ScannedFile" f LEFT JOIN suggestions s ON s."scannedFileId" = f.id WHERE f."sessionId" = ${sessionId}
     )
     SELECT count(*) FILTER (WHERE "readingStatus" = 'READ')::integer AS "filesRead",
-      count(*) FILTER (WHERE "processingStage" IN ('EXAMINED', 'SUGGESTIONS_GENERATED', 'RECOMMENDATIONS_READY')
-        OR EXISTS (SELECT 1 FROM "ObservationSession" o WHERE o."libraryDocumentId" = files."libraryDocumentId"))::integer AS "filesExamined",
+      count(*) FILTER (WHERE EXISTS (SELECT 1 FROM "ObservationSession" o WHERE o."libraryDocumentId" = files."libraryDocumentId"))::integer AS "filesExamined",
       count(*) FILTER (WHERE failed OR "processingStage" = 'UNSUPPORTED' OR "readStatus" = 'UNSUPPORTED'
-        OR "processingStage" IN ('EXAMINED', 'SUGGESTIONS_GENERATED', 'RECOMMENDATIONS_READY'))::integer AS "filesProcessed",
+        OR "processingStage" = 'EXAMINED'
+        OR ("processingStage" IN ('SUGGESTIONS_GENERATED', 'RECOMMENDATIONS_READY')
+          AND (suggestions > 0 OR historical = 0)))::integer AS "filesProcessed",
       count(*) FILTER (WHERE suggestions > 0)::integer AS "filesWithSuggestions",
       count(*) FILTER (WHERE failed)::integer AS "failedFiles",
       coalesce(sum(suggestions), 0)::integer AS "suggestionsGenerated", coalesce(sum(pending), 0)::integer AS "pendingSuggestions",

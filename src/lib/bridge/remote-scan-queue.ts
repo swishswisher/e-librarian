@@ -235,6 +235,26 @@ function scanResultFromReport(
   ).length;
   const failedFiles = files.filter((file) => file.readStatus === "FAILED").length;
 
+  // Native Bridge includes independently counted inventory totals. Never
+  // silently reinterpret a shortened, corrupted or partially serialized
+  // report as a genuine empty folder. An actual empty folder has four zeros.
+  if (
+    !Number.isSafeInteger(candidate.totalFiles) ||
+    !Number.isSafeInteger(candidate.supportedFiles) ||
+    !Number.isSafeInteger(candidate.unsupportedFiles) ||
+    !Number.isSafeInteger(candidate.failedFiles) ||
+    candidate.totalFiles !== files.length ||
+    candidate.supportedFiles !== supportedFiles ||
+    candidate.unsupportedFiles !== unsupportedFiles ||
+    candidate.failedFiles !== failedFiles
+  ) {
+    throw new BridgeCloudError(
+      "The Bridge scan report totals disagree with its inventory.",
+      422,
+      "INVALID_SCAN_INVENTORY",
+    );
+  }
+
   return {
     bridgeRootId,
     completedAt: dateValue(candidate.completedAt) ?? new Date(),
@@ -779,29 +799,43 @@ export async function importRemoteBridgeScanReport(input: {
   }
 
   if (!scan) throw new BridgeCloudError("The completed scan inventory is missing.", 400);
-  if (session.status !== "SCANNING") {
-    return withGrant(async (tx) => {
-      const current = await tx.scanSession.findUniqueOrThrow({ where: { id: session.id } });
-      if (["FAILED", "CANCELLED"].includes(current.status)) throw new BridgeCloudError("This scan is no longer awaiting inventory.", 409);
-      // A terminal-looking parent without a committed inventory is not proof
-      // that a reconnect/replayed report was ever imported successfully.
-      if (!current.importInventoryHash) {
-        throw new BridgeCloudError("This scan completed without durable inventory proof.", 409, "SCAN_INVENTORY_UNVERIFIED");
-      }
-      const recordedFiles = await tx.scannedFile.count({ where: { sessionId: scanSessionId } });
-      if (recordedFiles !== current.filesScanned || current.importInventoryHash !== createHash("sha256").update(JSON.stringify(
-        [...scan.files].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
-        (_key, value: unknown) => typeof value === "bigint" ? value.toString() : value,
-      )).digest("hex")) {
-        throw new BridgeCloudError("The completed scan inventory differs from its replay.", 409, "SCAN_INVENTORY_MISMATCH");
-      }
-      return { cloudScanSessionId: scanSessionId, alreadyImported: true };
-    }, true);
-  }
+  // A completed command can be reported again after transport interruption.
+  // Only the *same exact inventory* may be acknowledged as already imported.
+  // A different or empty replay must never mask a previously nonempty scan.
   const inventoryHash = createHash("sha256").update(JSON.stringify(
     [...scan.files].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
     (_key, value: unknown) => typeof value === "bigint" ? value.toString() : value,
   )).digest("hex");
+  if (session.status !== "SCANNING") {
+    return withGrant(async (tx) => {
+      const current = await tx.scanSession.findUniqueOrThrow({ where: { id: session.id } });
+      if (["FAILED", "CANCELLED"].includes(current.status)) throw new BridgeCloudError("This scan is no longer awaiting inventory.", 409);
+      if (!current.importInventoryHash ||
+          current.importInventoryHash !== inventoryHash ||
+          current.filesScanned !== scan.totalFiles ||
+          current.supportedFiles !== scan.supportedFiles ||
+          current.unsupportedFiles !== scan.unsupportedFiles ||
+          current.failedFiles !== scan.failedFiles) {
+        throw new BridgeCloudError(
+          "The completed scan cannot accept a different inventory replay.",
+          409,
+          "SCAN_INVENTORY_MISMATCH",
+        );
+      }
+      // Inventory authority requires the persisted rows as well as a matching
+      // native inventory hash. Missing database rows cannot become a complete
+      // library snapshot solely because a signed report was replayed.
+      const recordedFiles = await tx.scannedFile.count({ where: { sessionId: scanSessionId } });
+      if (recordedFiles !== current.filesScanned) {
+        throw new BridgeCloudError(
+          "The persisted scan inventory is incomplete; a fresh scan is required.",
+          409,
+          "SCAN_INVENTORY_UNVERIFIED",
+        );
+      }
+      return { cloudScanSessionId: scanSessionId, alreadyImported: true, totalFiles: scan.totalFiles };
+    }, true);
+  }
   await withGrant((tx) => tx.scanSession.updateMany({ where: { id: scanSessionId, status: "SCANNING", importInventoryHash: null },
     data: { importInventoryHash: inventoryHash } }));
   const owner = await prisma.scanSession.findUniqueOrThrow({ where: { id: scanSessionId } });

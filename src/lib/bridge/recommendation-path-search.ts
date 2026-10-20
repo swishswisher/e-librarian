@@ -1,15 +1,10 @@
-import type { BridgeOrganizationSuggestionSummary } from "./types";
-
-/** A filename/path filter must only match this recommendation's own file.
- * Related-file names in explanations and provenance are deliberately excluded. */
-export function recommendationPathSearchMatches(
-  suggestion: Pick<BridgeOrganizationSuggestionSummary,
-    "currentRelativePath" | "proposedRelativePath" | "proposedFileName">,
-  rawQuery: string,
+// The recommendation review field is deliberately a source filename/path
+// search. Supporting citations, alternative destinations and other clients'
+// filenames must never cause unrelated recommendations to appear.
+export function recommendationMatchesOwnFilePath(
+  suggestion: { currentRelativePath: string },
+  searchQuery: string,
 ) {
-  const query = rawQuery.trim().toLowerCase();
-  if (!query) return true;
-  return [suggestion.currentRelativePath, suggestion.proposedRelativePath,
-    suggestion.proposedFileName].some((value) =>
-      typeof value === "string" && value.toLowerCase().includes(query));
+  const query = searchQuery.trim().toLowerCase();
+  return !query || suggestion.currentRelativePath.toLowerCase().includes(query);
 }

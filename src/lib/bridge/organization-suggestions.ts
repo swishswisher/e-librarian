@@ -1719,14 +1719,58 @@ export function sourceLocationsForRecommendation(contentText: string, concepts: 
     .map((excerpt) => `Source location: characters ${excerpt.start}-${excerpt.end} of extracted text.`);
 }
 
-// A broad topic is not evidence that another client's archive is the
-// correct destination. Preserve explicit archive/organization boundaries
-// until a human-reviewed scoped preference authorizes a structural change.
-function archiveOwnerScope(relativePath: string) {
-  const [section, owner] = relativePath.replace(/\\/g, "/").split("/");
+// Broad subject labels do not justify erasing an established folder or client
+// hierarchy. Explicit human-approved destination preferences remain authoritative.
+// An unstructured Inbox/Downloads collection is allowed to receive cautious
+// filing suggestions, but a named client/project/archive is preserved by default.
+const stagingFolderPattern = /^(?:\d{1,3}[-_ ]+)?(?:[\p{L}\d]+[-_ ]+)*(?:inbox|downloads|unsorted|mess|loose|incoming|to[-_ ]sort|queue)$/iu;
+export function suppressBroadCategoryMove(
+  sourceRelativePath: string,
+  destinationFolder: string,
+  hasApprovedDestinationPreference = false,
+) {
+  if (hasApprovedDestinationPreference) return false;
+  const destinationParts = destinationFolder.split("/").filter(Boolean);
+  if (destinationParts.length !== 1) return false;
+  const sourceFolders = sourceRelativePath.replaceAll("\\", "/").split("/").filter(Boolean).slice(0, -1);
+  if (!sourceFolders.length) return false;
+  // A hierarchy is treated as unstructured only when *every* folder in the
+  // chain is a staging bucket, never when a named client/project contains one.
+  return !sourceFolders.every((folder) => stagingFolderPattern.test(folder.trim()));
+}
+
+// A nested destination is a real client/project scope, not merely a topic.
+// Shared clinical vocabulary cannot justify crossing either named ancestor.
+export function archiveOwnerScope(relativePath: string) {
+  const [section, owner] = relativePath.replaceAll("\\", "/").split("/").filter(Boolean);
   return (section === "00_EXISTING_ARCHIVE" || section === "08_DEEP_ARCHIVES") && owner
-    ? `${section}/${owner}`
-    : null;
+    ? `${section}/${owner}` : null;
+}
+
+// This final publication gate applies to document, image, audio and video
+// proposals, not only the topic-rule generator. Human-approved destinations
+// remain reviewable; an archive's client boundary is never inferred from topics.
+export function archiveSuggestionPathAllowed(
+  sourceRelativePath: string,
+  proposedRelativePath: string | null | undefined,
+  approvedDestinations: string[] = [],
+) {
+  const ownerScope = archiveOwnerScope(sourceRelativePath);
+  if (!ownerScope || !proposedRelativePath) return true;
+  const destination = proposedRelativePath.replaceAll("\\", "/").replace(/^\/+/, "");
+  if (destination.startsWith(`${ownerScope}/`)) return true;
+  return approvedDestinations.some((folder) => {
+    const normalizedFolder = folder.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+    return normalizedFolder.length > 0 && destination.startsWith(`${normalizedFolder}/`);
+  });
+}
+
+export function crossesNamedOrganizationBoundary(sourceRelativePath: string, destinationFolder: string) {
+  const source = sourceRelativePath.replaceAll("\\", "/").split("/").filter(Boolean).slice(0, -1);
+  const destination = destinationFolder.replaceAll("\\", "/").split("/").filter(Boolean);
+  if (destination.length < 2) return false;
+  return source[0] !== destination[0] ||
+    (source.length >= 2 && source[1] !== destination[1]);
 }
 
 function moveAndFolderDrafts(context: SuggestionContext) {
@@ -1763,12 +1807,25 @@ function moveAndFolderDrafts(context: SuggestionContext) {
       (best.rule.id === "workshops" && relationship.relationshipKind === "SAME_WORKSHOP"))
     .slice(0, 2);
   const currentFolder = folderFromRelativePath(context.currentRelativePath);
-  if (archiveOwnerScope(context.currentRelativePath) &&
-      !destinationFolder.includes("/") && !approvedPreference) {
-    // A generic category must never flatten a structured client's archive
-    // from provisional topic overlap alone.
+  // Generic clinical subject words do not establish a destination. An
+  // established folder or separately approved preference is required before
+  // proposing a new broad Clinical Tools move.
+  if (best.rule.id === "clinical-tools" && !establishedFolder && !approvedPreference) {
     return [];
   }
+  // Preserve scope and depth: shared subjects are not specific destination
+  // evidence for an unrelated client or a flattened established archive.
+  const sourceFolderCount = context.currentRelativePath.split("/").filter(Boolean).length - 1;
+  const destinationFolderCount = destinationFolder.split("/").filter(Boolean).length;
+  if (!approvedPreference && (
+    crossesNamedOrganizationBoundary(context.currentRelativePath, destinationFolder) ||
+    (sourceFolderCount >= 3 && destinationFolderCount < sourceFolderCount)
+  )) return [];
+  if (suppressBroadCategoryMove(
+    context.currentRelativePath,
+    destinationFolder,
+    Boolean(approvedPreference),
+  )) return [];
   const proposedRelativePath = joinRelativePath(destinationFolder, context.fileName);
   const drafts: SuggestionDraft[] = [];
   const matchedConcepts = best.directMatches.join(", ");
@@ -1789,10 +1846,13 @@ function moveAndFolderDrafts(context: SuggestionContext) {
     drafts.push(
       makeDraft(context, {
         confidence:
-          0.68 +
-          Math.min(best.directMatches.length, 4) * 0.02 +
-          (clusterSupport ? 0.04 : 0),
-        evidenceStrength: "STRONG",
+          best.rule.id === "clinical-tools" && !approvedPreference
+            ? 0.66
+            : 0.68 +
+              Math.min(best.directMatches.length, 4) * 0.02 +
+              (clusterSupport ? 0.04 : 0),
+        evidenceStrength: best.rule.id === "clinical-tools" && !approvedPreference
+          ? "SUPPORTED" : "STRONG",
         explanation: `The readable or reviewed content repeatedly supports ${matchedConcepts}. There is no established matching folder in this scan, so creating ${best.rule.folder} is presented only as a dependency of the proposed move.`,
         proposedRelativePath: normalizeBridgeRelativePath(destinationFolder),
         suggestionType: "CREATE_FOLDER",
@@ -1821,12 +1881,15 @@ function moveAndFolderDrafts(context: SuggestionContext) {
   if (normalizeText(currentFolder) !== normalizeText(destinationFolder)) {
     drafts.push(
       makeDraft(context, {
-        confidence:
-          0.68 +
-          Math.min(best.directMatches.length, 4) * 0.02 +
-          (establishedFolder ? 0.04 : 0) +
-          (clusterSupport ? 0.04 : 0),
-        evidenceStrength: "STRONG",
+        confidence: best.rule.id === "clinical-tools" && destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+          ? 0.66 // Topic evidence is not independent proof of destination authority.
+          : 0.68 +
+            Math.min(best.directMatches.length, 4) * 0.02 +
+            (establishedFolder ? 0.04 : 0) +
+            (clusterSupport ? 0.04 : 0),
+        evidenceStrength: best.rule.id === "clinical-tools" && destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+          ? "SUPPORTED"
+          : "STRONG",
         explanation: `The readable or reviewed content includes the related concepts ${matchedConcepts}. ${folderEvidence} Together, that evidence supports reviewing ${destinationFolder} as a destination.`,
         proposedRelativePath,
         suggestionType: "MOVE_FILE",
@@ -1957,11 +2020,6 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     }
 
     const folder = folderFromRelativePath(file.relativePath);
-    const sourceScope = archiveOwnerScope(context.currentRelativePath);
-    const candidateScope = archiveOwnerScope(file.relativePath);
-    if ((sourceScope || candidateScope) && sourceScope !== candidateScope) {
-      continue;
-    }
     const overlap = [
       ...new Set(
         tokenize(file.relativePath).filter((term) => semanticTerms.has(term)),
@@ -1969,6 +2027,34 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     ];
 
     if (!folder || overlap.length === 0 || normalizeText(folder) === currentFolder) {
+      continue;
+    }
+
+    // Separate named client/project branches must not be proposed as
+    // destinations merely because their files share clinical vocabulary.
+    const sourceScope = context.currentRelativePath.split("/").filter(Boolean);
+    const targetScope = folder.split("/").filter(Boolean);
+    // A real client name repeated in the file's own title and content can
+    // identify a specific established owner destination from an unfiled intake
+    // bucket. Generic words or the candidate folder name alone cannot do so.
+    const ownerTokens = tokenize(path.posix.basename(folder));
+    const sourceTextTokens = new Set(tokenize(context.contentText));
+    const intakeRoot = sourceScope[0]?.toLowerCase() === "clients" ||
+      stagingFolderPattern.test(sourceScope[0] ?? "");
+    const fromUnfiledIntake = intakeRoot &&
+      sourceScope.slice(1, -1).every((part) => stagingFolderPattern.test(part));
+    const concreteOwnerMatch = fromUnfiledIntake && targetScope.length === 1 &&
+      ownerTokens.length === 1 && sourceFileNameTerms.has(ownerTokens[0]!) &&
+      sourceTextTokens.has(ownerTokens[0]!);
+    if (targetScope.length >= 2 &&
+        (sourceScope[0] !== targetScope[0] ||
+         (sourceScope.length >= 3 && sourceScope[1] !== targetScope[1])) &&
+        !concreteOwnerMatch) {
+      continue;
+    }
+    // Unrelated named archives must remain intact; a genuinely evidenced
+    // owner-name match from an intake queue may still be considered.
+    if (suppressBroadCategoryMove(context.currentRelativePath, folder) && !concreteOwnerMatch) {
       continue;
     }
 
@@ -2882,12 +2968,29 @@ async function persistDrafts(
     context.currentRelativePath,
     drafts.map(cleanDraftPaths),
   );
+  const approvedDestinationPaths = context.approvedPreferences.map(
+    (preference) => preference.destinationRelativePath,
+  );
   const safeReconciledDrafts = reconciledDrafts.flatMap((draft) => {
+    const moveProposal = ["MOVE_FILE", "MOVE_AND_RENAME_FILE", "GROUP_WITH_FILES", "CREATE_FOLDER"]
+      .includes(draft.suggestionType);
+    if (moveProposal && !archiveSuggestionPathAllowed(
+      context.currentRelativePath, draft.proposedRelativePath, approvedDestinationPaths,
+    )) return [];
+    // Alternatives cannot smuggle a different archive owner's destination
+    // past the primary proposal's boundary check.
+    const safeDraft = {
+      ...draft,
+      alternatives: draft.alternatives.filter((alternative) =>
+        archiveSuggestionPathAllowed(
+          context.currentRelativePath, alternative.proposedRelativePath, approvedDestinationPaths,
+        )),
+    };
     if (draft.suggestionType !== "POSSIBLE_DUPLICATE") {
-      return [draft];
+      return [safeDraft];
     }
 
-    const duplicateEvidence = draft.duplicateEvidence.filter(
+    const duplicateEvidence = safeDraft.duplicateEvidence.filter(
       (match) =>
         !samePhysicalFilePresentation(
           {
@@ -2901,9 +3004,9 @@ async function persistDrafts(
     return duplicateEvidence.length > 0
       ? [
           {
-            ...draft,
+            ...safeDraft,
             duplicateEvidence,
-            supportingInformation: draft.supportingInformation.filter(
+            supportingInformation: safeDraft.supportingInformation.filter(
               (detail) =>
                 !draft.duplicateEvidence.some(
                   (match) =>

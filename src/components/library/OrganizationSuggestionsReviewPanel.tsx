@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { recommendationMatchesOwnFilePath } from "@/lib/bridge/recommendation-path-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useRouter } from "next/navigation";
@@ -11,7 +12,6 @@ import { NsnCard } from "@/components/library/NsnCard";
 import { NsnEmptyState } from "@/components/library/NsnEmptyState";
 import { NsnSearchField } from "@/components/library/NsnSearchField";
 import { getRecommendationExamineRoute } from "@/lib/library/routes";
-import { recommendationPathSearchMatches } from "@/lib/bridge/recommendation-path-search";
 import type {
   BridgeOrganizationSuggestionMutationResponse,
   BridgeOrganizationSuggestionSummary,
@@ -520,12 +520,19 @@ export function OrganizationSuggestionsReviewPanel({
           return false;
         }
 
-        return recommendationPathSearchMatches(suggestion, searchQuery);
+        const query = searchQuery.trim().toLowerCase();
+
+        if (!query) {
+          return true;
+        }
+
+        // Search the recommended source file, not evidence mentioning a
+        // different client's file or a proposed destination.
+        return recommendationMatchesOwnFilePath(suggestion, query);
       }),
     [
       activeFilter,
       libraryIdBySuggestionId,
-      libraryNameBySuggestionId,
       rows,
       searchQuery,
     ],

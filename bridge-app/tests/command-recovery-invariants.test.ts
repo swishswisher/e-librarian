@@ -11,6 +11,8 @@ import { saveBridgeSecret } from "../../apps/bridge/src/main/keychain";
 import { unfinishedPhysicalCommands, preparePhysicalCommand, markPhysicalCommandStarted } from "../../apps/bridge/src/main/command-journal";
 import { executeBridgePlanActions, executeBridgeUndoActions, recoverBridgePhysicalActions } from "../src/filesystem/operations";
 import { journaledMove } from "../src/filesystem/physical-journal";
+import { withBoundedTemporaryRead } from "../../apps/bridge/src/main/command-runner";
+import { BridgeAppError } from "../src/types";
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "nsn-command-recovery-"));
@@ -148,4 +150,21 @@ test("ROOT-2 native grant mutation queued before execution is rechecked inside t
   release(); await lock; await denial;
   await assert.rejects(execution, /permission/);
   assert.equal(await readFile(path.join(f.directory, "source.txt"), "utf8"), f.bytes);
+});
+
+test("READ-1 a stalled temporary text read is aborted before another file is examined", async () => {
+  let aborted = false;
+  const slowRead = (signal: AbortSignal) => new Promise<string>((_resolve, reject) => {
+    signal.addEventListener("abort", () => {
+      aborted = true;
+      reject(signal.reason);
+    }, { once: true });
+  });
+  await assert.rejects(
+    withBoundedTemporaryRead(slowRead, 20),
+    (error) => error instanceof BridgeAppError && error.code === "READ_COMMAND_TIMEOUT",
+  );
+  assert.equal(aborted, true, "The pending read must receive its cancellation signal.");
+  const next = await withBoundedTemporaryRead(async () => "A valid independent file", 200);
+  assert.equal(next, "A valid independent file");
 });

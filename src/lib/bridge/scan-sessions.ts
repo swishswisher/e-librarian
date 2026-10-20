@@ -2,7 +2,7 @@ import path from "node:path";
 import { lockMonitoringBatch, monitoringLeaseMs, type MonitoringOwner } from "./monitoring-authority";
 import { isCurrentReadableRoot } from "./current-readable-root";
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { getPrismaClient } from "@/lib/db/prisma";
 import { recoverPendingScanPublications } from "./scan-publication";
@@ -1010,6 +1010,32 @@ export async function getBridgeScanSessionProgress(sessionId: string) {
     remainingFiles: Math.max(0, summary.totalFiles - counts.filesProcessed), sessionId: summary.id,
     startedAt: summary.startedAt, supportedFiles: summary.supportedFiles, unsupportedFiles: summary.unsupportedFiles };
   return { progress, session: summary };
+}
+
+// Rehydrate scan cards from durable session state after a page reload or a
+// Connected Libraries manager remount. Select only the newest scan per
+// authorized connected-library ID with a bounded result per library.
+export async function latestBridgeScanProgressByConnectedLibrary(
+  connectedLibraryIds: string[],
+): Promise<Record<string, BridgeScanProcessingProgress>> {
+  const ids = [...new Set(connectedLibraryIds.filter(Boolean))];
+  if (!ids.length) return {};
+
+  const latest = await getPrismaClient().$queryRaw<Array<{ id: string; connectedFolderId: string }>>(Prisma.sql`
+    SELECT DISTINCT ON (s."connectedFolderId") s.id, s."connectedFolderId"
+    FROM "ScanSession" s
+    WHERE s."connectedFolderId" IN (${Prisma.join(ids)})
+    ORDER BY s."connectedFolderId", s."startedAt" DESC, s.id DESC
+  `);
+  const results = await Promise.all(latest.map(async (scan) => {
+    const result = await getBridgeScanSessionProgress(scan.id);
+    return [scan.connectedFolderId, result?.progress ?? null] as const;
+  }));
+  const current: Record<string, BridgeScanProcessingProgress> = {};
+  for (const [libraryId, progress] of results) {
+    if (progress) current[libraryId] = progress;
+  }
+  return current;
 }
 
 export async function getActiveBridgeScanSessionProgress() {

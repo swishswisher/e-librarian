@@ -5,14 +5,14 @@ import test from "node:test";
 import {
   actionCanBeChosen,
   chooseActionForSource,
-  completedExecutionActionCounts,
+  historicalExecutionActionCounts,
   organizationPlanDecisionGroups,
   organizationPlanDownload,
   organizationPlanLiveSummary,
   selectionMatchesSavedPlan,
 } from "../../src/lib/bridge/organization-plan-review";
 import { currentRecommendationGenerationVersion } from "../../src/lib/bridge/recommendation-generation";
-import { recommendationPathSearchMatches } from "../../src/lib/bridge/recommendation-path-search";
+import { recommendationMatchesOwnFilePath } from "../../src/lib/bridge/recommendation-path-search";
 import {
   calibratedDuplicateConfidence,
   reconcileRecommendationDrafts,
@@ -25,31 +25,6 @@ import type {
   OrganizationSuggestionType,
   OrganizationPlanActionType,
 } from "../../src/lib/bridge/types";
-
-test("filename search matches the recommendation's own file, not cross-referenced evidence", () => {
-  const target = { currentRelativePath: "00_EXISTING_ARCHIVE/HFA/Restorative/RPR_03_Participant_worksheet.md",
-    proposedRelativePath: "Clinical Tools/RPR_03_Participant_worksheet.md", proposedFileName: null };
-  const related = { currentRelativePath: "00_EXISTING_ARCHIVE/HFA/Restorative/RPR_02_Session_plan.md",
-    proposedRelativePath: "Clinical Tools/RPR_02_Session_plan.md", proposedFileName: null };
-  assert.equal(recommendationPathSearchMatches(target, "RPR_03_Participant_worksheet.md"), true);
-  assert.equal(recommendationPathSearchMatches(related, "RPR_03_Participant_worksheet.md"), false);
-  assert.equal(recommendationPathSearchMatches(target, target.currentRelativePath), true);
-  assert.equal(recommendationPathSearchMatches(related, "RPR_02_"), true);
-  assert.equal(recommendationPathSearchMatches(related, ""), true);
-});
-
-test("completed organization history counts actual created folders after selected dependencies disappear", () => {
-  const actions = [
-    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: true },
-    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: false },
-    { actionType: "MOVE_FILE", status: "COMPLETED", createdFilesystemItem: false },
-    { actionType: "RENAME_FILE", status: "COMPLETED", createdFilesystemItem: false },
-    { actionType: "CREATE_FOLDER", status: "FAILED", createdFilesystemItem: true },
-  ] as const;
-  assert.deepEqual(completedExecutionActionCounts(actions), {
-    filesMoved: 1, filesRenamed: 1, foldersCreated: 1,
-  });
-});
 
 function action(input: {
   actionType?: OrganizationPlanActionType;
@@ -236,6 +211,42 @@ test("folder dependencies and live safety counts follow the current destination"
       foldersCreated: 3,
     },
   );
+});
+
+test("historical execution counts reflect physical outcomes even after Undo and plan edits", () => {
+  const actions = [
+    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: true },
+    { actionType: "CREATE_FOLDER", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "CREATE_FOLDER", status: "FAILED", createdFilesystemItem: true },
+    { actionType: "MOVE_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "RENAME_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "MOVE_AND_RENAME_FILE", status: "COMPLETED", createdFilesystemItem: false },
+    { actionType: "MOVE_FILE", status: "FAILED", createdFilesystemItem: false },
+  ] as const;
+
+  assert.deepEqual(historicalExecutionActionCounts(actions), {
+    filesMoved: 2,
+    filesRenamed: 2,
+    foldersCreated: 1,
+  });
+  assert.deepEqual(historicalExecutionActionCounts([]), {
+    filesMoved: 0, filesRenamed: 0, foldersCreated: 0,
+  });
+});
+
+test("filename search excludes unrelated supporting evidence and proposed destinations", () => {
+  const item = {
+    currentRelativePath: "Client A/Intake/worksheet.txt",
+    proposedRelativePath: "Clinical Tools/worksheet.txt",
+    supportingInformation: ["Related file: Client B/Archives/report.txt"],
+    title: "Move with related reports",
+  };
+  assert.equal(recommendationMatchesOwnFilePath(item, "worksheet.txt"), true);
+  assert.equal(recommendationMatchesOwnFilePath(item, "client a/intake"), true);
+  assert.equal(recommendationMatchesOwnFilePath(item, "  WORKSHEET  "), true);
+  assert.equal(recommendationMatchesOwnFilePath(item, "report.txt"), false);
+  assert.equal(recommendationMatchesOwnFilePath(item, "Clinical Tools"), false);
+  assert.equal(recommendationMatchesOwnFilePath(item, ""), true);
 });
 
 test("review-only items cannot become choices and exported JSON contains only shown saved choices", () => {
