@@ -553,6 +553,14 @@ test("remote scanner refuses a truncated single-file report and accepts an exact
     })),
     /different inventory replay/i,
   );
+
+  // Test a fully signed, byte-identical report against a damaged persisted
+  // inventory: an imported snapshot with missing rows cannot be current truth.
+  await prisma.scannedFile.deleteMany({ where: { sessionId: session.id } });
+  await assert.rejects(
+    () => importRemoteBridgeScanReport(argumentsFor(genuineScan)),
+    /persisted scan inventory is incomplete/i,
+  );
 });
 
 test("cloud scan import queues audio reads and records checksum duplicates across roots", async () => {

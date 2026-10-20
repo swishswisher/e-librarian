@@ -822,6 +822,17 @@ export async function importRemoteBridgeScanReport(input: {
           "SCAN_INVENTORY_MISMATCH",
         );
       }
+      // Inventory authority requires the persisted rows as well as a matching
+      // native inventory hash. Missing database rows cannot become a complete
+      // library snapshot solely because a signed report was replayed.
+      const recordedFiles = await tx.scannedFile.count({ where: { sessionId: scanSessionId } });
+      if (recordedFiles !== current.filesScanned) {
+        throw new BridgeCloudError(
+          "The persisted scan inventory is incomplete; a fresh scan is required.",
+          409,
+          "SCAN_INVENTORY_UNVERIFIED",
+        );
+      }
       return { cloudScanSessionId: scanSessionId, alreadyImported: true, totalFiles: scan.totalFiles };
     }, true);
   }
