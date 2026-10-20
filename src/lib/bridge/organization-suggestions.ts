@@ -1,9 +1,19 @@
+import { blockingPlanExecutionWhere } from "./plan-execution-authority";
+import { lockRecommendationBatch, type RecommendationBatchOwner } from "./recommendation-batch-authority";
+import { currentReadableRootWhere } from "./current-readable-root";
+import { eligibleMemorySql } from "@/lib/library/memory-provenance";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import { verifiedSourceExcerpts } from "@/lib/ai/source-evidence";
 
 import { getPrismaClient } from "@/lib/db/prisma";
+import {
+  applicableApprovedPreferences,
+  disputePreferencesFromDecisions,
+  proposeOrganizationPreferences,
+} from "@/lib/library/organization-preferences";
 
 import {
   ConnectedLibraryError,
@@ -12,10 +22,14 @@ import {
 import { isAudioFileType, jsonAudioHumanLabels, jsonStringArray } from "./audio-metadata";
 import {
   findExactChecksumDuplicateForScannedFile,
+  loadExactChecksumDuplicateIndex,
+  type DuplicateCandidate,
   recordChecksumDuplicateSuggestionsForSession,
 } from "./checksum-duplicates";
 import { jsonImageHumanLabels } from "./image-metadata";
+import { formatOrganizationConcepts } from "./organization-concepts";
 import { readScannedFile } from "./reader";
+import { earlierRelationshipContext } from "./persistent-knowledge";
 import {
   recommendationSupportForStorage,
   recommendationSupportFromJson,
@@ -102,6 +116,9 @@ type TopicRule = {
 };
 
 type SuggestionContext = {
+  index?: RecommendationContextIndex;
+  authority: string;
+  preferenceVersions: Array<{ id: string; version: number }>;
   contentText: string;
   currentRelativePath: string;
   fileName: string;
@@ -133,6 +150,12 @@ type SuggestionContext = {
   semanticFiles: ScanWorkingKnowledgeFile[];
   semanticRelationships: ScanWorkingKnowledgeRelationship[];
   memoryMatches: MemoryMatch[];
+  earlierRelationships: Array<{ relationshipKind: string | null; relativePath: string; supportingTopics: string[] }>;
+  approvedPreferences: Array<{
+    destinationRelativePath: string;
+    id: string;
+    scopeTerms: string[];
+  }>;
   preferredTerms: string[];
   audioMetadata: {
     audioFingerprint: string | null;
@@ -181,6 +204,98 @@ type MemoryMatch = {
   memoryType: string;
   overlap: string[];
 };
+
+type SiblingFile = SuggestionContext["siblingFiles"][number];
+export type RecommendationIndexWork = { fileVisits?: number; candidateVisits?: number };
+export type RecommendationContextIndex = {
+  duplicateTargets?: Map<string, DuplicateCandidate>;
+  siblings: SiblingFile[];
+  fileById: Map<string, SiblingFile>;
+  semanticFileById: Map<string, ScanWorkingKnowledgeFile>;
+  clustersByFile: Map<string, ScanWorkingKnowledgeCluster[]>;
+  relationshipsByFile: Map<string, ScanWorkingKnowledgeRelationship[]>;
+  folderStructure: string[];
+  foldersByRule: Map<string, Array<{ folder: string; fileCount: number; exactName: boolean; sharedTerms: string[] }>>;
+  pathTerms: Map<string, Map<string, SiblingFile[]>>;
+  imageKeys: Map<string, SiblingFile[]>;
+  work?: RecommendationIndexWork;
+};
+
+// These are advisory candidate pools, not an authority/provenance cap. Every
+// file gets its own generation; saved human recommendations remain immutable.
+// Postings skip the whole current folder before selecting bounded alternatives.
+export function recommendationIndexedCandidates(index: RecommendationContextIndex, terms: string[], currentFolder: string) {
+  const candidates = new Map<string, SiblingFile>();
+  for (const term of terms.slice(0, 10)) {
+    let selected = 0;
+    for (const [folder, files] of index.pathTerms.get(term) ?? []) {
+      if (normalizeText(folder) === normalizeText(currentFolder)) continue;
+      for (const file of files) {
+        if (index.work) index.work.candidateVisits = (index.work.candidateVisits ?? 0) + 1;
+        candidates.set(file.id, file);
+        if (++selected >= 64) break;
+      }
+      if (selected >= 64) break;
+    }
+  }
+  return [...candidates.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath) || a.id.localeCompare(b.id));
+}
+
+export function buildRecommendationContextIndex(siblings: SiblingFile[], knowledge?: ScanWorkingKnowledgeIndex, work?: RecommendationIndexWork): RecommendationContextIndex {
+  const index: RecommendationContextIndex = { siblings, fileById: new Map(), semanticFileById: new Map(knowledge?.files.map((file) => [file.id, file])),
+    clustersByFile: new Map(), relationshipsByFile: new Map(), folderStructure: [], foldersByRule: new Map(), pathTerms: new Map(), imageKeys: new Map(), work };
+  const folders = new Map<string, number>();
+  const physicalPaths = new Set<string>();
+  for (const file of [...siblings].sort((a, b) => a.relativePath.localeCompare(b.relativePath) || a.id.localeCompare(b.id))) {
+    if (work) work.fileVisits = (work.fileVisits ?? 0) + 1;
+    index.fileById.set(file.id, file);
+    const parts = normalizeBridgeRelativePath(file.relativePath).split("/");
+    for (let depth = 1; depth < parts.length; depth++) {
+      const folder = parts.slice(0, depth).join("/"); folders.set(folder, (folders.get(folder) ?? 0) + 1);
+    }
+    const physical = normalizePhysicalRelativePath(file.relativePath);
+    if (physicalPaths.has(physical)) continue;
+    physicalPaths.add(physical);
+    const folder = folderFromRelativePath(file.relativePath);
+    if (folder) for (const term of new Set(tokenize(file.relativePath))) {
+      const groups = index.pathTerms.get(term) ?? new Map<string, SiblingFile[]>();
+      const files = groups.get(folder) ?? []; files.push(file); groups.set(folder, files); index.pathTerms.set(term, groups);
+    }
+    if (isImageFileType(file.fileType)) {
+      const stem = normalizedImageStem(file.relativePath);
+      const terms = [...new Set(tokenize(stem))];
+      const keys = [`stem:${normalizeText(stem)}`, ...(file.imageFingerprint ? [`fingerprint:${file.imageFingerprint}`] : [])];
+      for (let a = 0; a < terms.length; a++) for (let b = a + 1; b < terms.length; b++) keys.push(`pair:${[terms[a], terms[b]].sort().join("\u001f")}`);
+      for (const key of keys) { const files = index.imageKeys.get(key) ?? []; files.push(file); index.imageKeys.set(key, files); }
+    }
+  }
+  index.folderStructure = [...folders.keys()].sort((a, b) => a.localeCompare(b));
+  for (const rule of topicRules) {
+    const ruleName = normalizeText(path.posix.basename(rule.folder)); const ruleTerms = new Set(tokenize(rule.folder));
+    index.foldersByRule.set(rule.id, index.folderStructure.map((folder) => {
+      const name = path.posix.basename(folder); const terms = new Set(tokenize(name));
+      return { folder, fileCount: folders.get(folder)!, exactName: normalizeText(name) === ruleName, sharedTerms: [...ruleTerms].filter((term) => terms.has(term)) };
+    }).filter((folder) => folder.fileCount >= 2 && (folder.exactName || folder.sharedTerms.length >= 2))
+      .sort((a, b) => Number(b.exactName) - Number(a.exactName) || b.fileCount - a.fileCount || a.folder.localeCompare(b.folder)));
+  }
+  for (const cluster of knowledge?.clusters ?? []) for (const id of cluster.memberFileIds) {
+    const clusters = index.clustersByFile.get(id) ?? []; clusters.push(cluster); index.clustersByFile.set(id, clusters);
+  }
+  for (const relation of knowledge?.relationships ?? []) for (const id of [relation.leftFileId, relation.rightFileId]) {
+    const relations = index.relationshipsByFile.get(id) ?? []; relations.push(relation); index.relationshipsByFile.set(id, relations);
+  }
+  return index;
+}
+
+export async function loadRecommendationContextIndex(scanSessionId: string, knowledge?: ScanWorkingKnowledgeIndex) {
+  const files = await getPrismaClient().scannedFile.findMany({ where: { sessionId: scanSessionId, sourceUnavailableAt: null, readStatus: { not: "FAILED" } }, orderBy: [{ relativePath: "asc" }, { id: "asc" }],
+    select: { id: true, relativePath: true, localPath: true, checksum: true, fileType: true, sizeBytes: true,
+      audioMetadata: { select: { audioFingerprint: true } }, imageMetadata: { select: { imageFingerprint: true } }, videoMetadata: { select: { videoFingerprint: true } } } });
+  const index = buildRecommendationContextIndex(files.map((file) => ({ ...file, audioFingerprint: file.audioMetadata?.audioFingerprint,
+    imageFingerprint: file.imageMetadata?.imageFingerprint, videoFingerprint: file.videoMetadata?.videoFingerprint })), knowledge);
+  index.duplicateTargets = await loadExactChecksumDuplicateIndex(scanSessionId);
+  return index;
+}
 
 type DuplicateEvidenceFile = {
   audioFingerprint: string | null;
@@ -577,21 +692,6 @@ function fileNameLooksGeneric(fileName: string) {
   );
 }
 
-function collectFolderStructure(relativePaths: string[]) {
-  const folders = new Set<string>();
-
-  for (const relativePath of relativePaths) {
-    const normalized = normalizeBridgeRelativePath(relativePath);
-    const parts = normalized.split("/");
-
-    for (let index = 1; index < parts.length; index += 1) {
-      folders.add(parts.slice(0, index).join("/"));
-    }
-  }
-
-  return [...folders].sort((left, right) => left.localeCompare(right));
-}
-
 function filesUnderFolder(context: SuggestionContext, folder: string) {
   const normalizedFolder = normalizeBridgeRelativePath(folder).toLowerCase();
   const prefix = `${normalizedFolder}/`;
@@ -613,6 +713,19 @@ function establishedFolderForRule(
   rule: TopicRule,
   context: SuggestionContext,
 ) {
+  if (context.index) {
+    const candidates = [];
+    const current = normalizeBridgeRelativePath(context.currentRelativePath).toLowerCase();
+    for (const candidate of context.index.foldersByRule.get(rule.id) ?? []) {
+      const ownFolder = current.startsWith(`${normalizeBridgeRelativePath(candidate.folder).toLowerCase()}/`);
+      const fileCount = candidate.fileCount - Number(ownFolder);
+      if (fileCount >= 2) candidates.push({ ...candidate, fileCount });
+      // All affected candidates are ancestors of this file. The first unaffected
+      // candidate bounds the remaining sorted list without a per-file folder scan.
+      if (!ownFolder) break;
+    }
+    return candidates.sort((a, b) => Number(b.exactName) - Number(a.exactName) || b.fileCount - a.fileCount || a.folder.localeCompare(b.folder))[0];
+  }
   const normalizedRuleFolder = normalizeText(path.posix.basename(rule.folder));
   const ruleTerms = new Set(tokenize(rule.folder));
 
@@ -682,6 +795,7 @@ function textFromJson(value: Prisma.JsonValue) {
 
 function reviewedObservationText(
   sessions: Array<{
+    humanDecisions?: Array<{ decisionType: string; editedSuggestion: string | null }>;
     status: string;
     observations: Prisma.JsonValue;
     interpretations: Prisma.JsonValue;
@@ -691,12 +805,16 @@ function reviewedObservationText(
 ) {
   return sessions
     .filter((session) => trustedObservationStatuses.has(session.status))
-    .flatMap((session) => [
-      ...textFromJson(session.observations),
-      ...textFromJson(session.interpretations),
-      ...textFromJson(session.explanation),
-      ...textFromJson(session.planSuggestions),
-    ])
+    .flatMap((session) => session.status === "MODIFIED"
+      ? session.humanDecisions?.find(
+          (decision) => decision.decisionType === "MODIFY" && decision.editedSuggestion?.trim(),
+        )?.editedSuggestion ?? []
+      : [
+          ...textFromJson(session.observations),
+          ...textFromJson(session.interpretations),
+          ...textFromJson(session.explanation),
+          ...textFromJson(session.planSuggestions),
+        ])
     .filter((item) => item.trim().length > 0);
 }
 
@@ -880,7 +998,7 @@ function semanticClusterSupport(context: SuggestionContext, rule: TopicRule) {
     return undefined;
   }
 
-  const fileById = new Map(context.semanticFiles.map((file) => [file.id, file]));
+  const fileById = context.index?.semanticFileById ?? new Map(context.semanticFiles.map((file) => [file.id, file]));
   const directSupport = context.semanticRelationships.flatMap((relationship) => {
     if (!relationship.supportingTopics.includes(rule.id)) {
       return [];
@@ -1156,7 +1274,22 @@ function imageDuplicateDraft(context: SuggestionContext) {
 
   const currentStem = normalizedImageStem(context.currentRelativePath);
   const pathText = imageSignalText(context);
-  const candidates = context.siblingFiles
+  let imageFiles = context.siblingFiles;
+  if (context.index) {
+    const terms = [...new Set(tokenize(currentStem))];
+    const keys = [`stem:${normalizeText(currentStem)}`, ...(context.imageMetadata?.imageFingerprint ? [`fingerprint:${context.imageMetadata.imageFingerprint}`] : [])];
+    for (let a = 0; a < terms.length; a++) for (let b = a + 1; b < terms.length; b++) keys.push(`pair:${[terms[a], terms[b]].sort().join("\u001f")}`);
+    const selected = new Map<string, SiblingFile>();
+    for (const key of keys) {
+      let count = 0;
+      for (const file of context.index.imageKeys.get(key) ?? []) {
+        if (normalizePhysicalRelativePath(file.relativePath) === normalizePhysicalRelativePath(context.currentRelativePath)) continue;
+        selected.set(file.id, file); if (++count === 4) break;
+      }
+    }
+    imageFiles = [...selected.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath) || a.id.localeCompare(b.id));
+  }
+  const candidates = imageFiles
     .filter(
       (file) =>
         file.id !== context.scannedFileId &&
@@ -1207,7 +1340,7 @@ function imageDuplicateDraft(context: SuggestionContext) {
           ? `Filename terms in common: ${candidate.overlap.join(", ")}.`
           : null,
         candidate.file.sizeBytes !== null &&
-        context.siblingFiles.find((file) => file.id === context.scannedFileId)
+        (context.index?.fileById.get(context.scannedFileId) ?? context.siblingFiles.find((file) => file.id === context.scannedFileId))
           ?.sizeBytes === candidate.file.sizeBytes
           ? "Matching file size."
           : null,
@@ -1429,12 +1562,12 @@ function audioWebsiteCandidateDraft(context: SuggestionContext) {
   return makeDraft(context, {
     confidence: 0.55,
     explanation:
-      "The Librarian noticed this recording may contain material worth reviewing for public use. Approval is required before it can influence any publishing plan.",
+      "The recording's file path or reviewed labels suggest a possible public-use candidate. Its spoken content may not have been transcribed, so Deanne must review it.",
     proposedRelativePath: joinRelativePath("Website Candidates/Audio", context.fileName),
     suggestionType: "WEBSITE_CANDIDATE",
     title: "Review this recording as a possible website candidate",
     whySuggested: [
-      "The recording includes public-facing or website-oriented signals.",
+      "The file path or reviewed labels include public-facing wording.",
       "Private recordings are excluded from publishing recommendations.",
     ],
   });
@@ -1543,12 +1676,12 @@ function videoWebsiteCandidateDraft(context: SuggestionContext) {
   return makeDraft(context, {
     confidence: 0.56,
     explanation:
-      "The Librarian noticed this video may contain material worth reviewing for public use. Approval is required before it can influence any publishing plan.",
+      "The video's file path or reviewed labels suggest a possible public-use candidate. Its speech and scenes may not have been analyzed, so Deanne must review it.",
     proposedRelativePath: joinRelativePath("Website Candidates/Video", context.fileName),
     suggestionType: "WEBSITE_CANDIDATE",
     title: "Review this video as a possible website candidate",
     whySuggested: [
-      "The video includes public-facing, webinar, or branding signals.",
+      "The file path or reviewed labels include public-facing, webinar, or branding wording.",
       "Private videos are excluded from publishing recommendations.",
     ],
   });
@@ -1579,6 +1712,67 @@ function imageWebsiteCandidateDraft(context: SuggestionContext) {
   });
 }
 
+export function sourceLocationsForRecommendation(contentText: string, concepts: string[]) {
+  return verifiedSourceExcerpts(contentText)
+    .filter((excerpt) => textContainsAnyTerm(excerpt.text, concepts))
+    .slice(0, 3)
+    .map((excerpt) => `Source location: characters ${excerpt.start}-${excerpt.end} of extracted text.`);
+}
+
+// Broad subject labels do not justify erasing an established folder or client
+// hierarchy. Explicit human-approved destination preferences remain authoritative.
+// An unstructured Inbox/Downloads collection is allowed to receive cautious
+// filing suggestions, but a named client/project/archive is preserved by default.
+const stagingFolderPattern = /^(?:\d{1,3}[-_ ]+)?(?:[\p{L}\d]+[-_ ]+)*(?:inbox|downloads|unsorted|mess|loose|incoming|to[-_ ]sort|queue)$/iu;
+export function suppressBroadCategoryMove(
+  sourceRelativePath: string,
+  destinationFolder: string,
+  hasApprovedDestinationPreference = false,
+) {
+  if (hasApprovedDestinationPreference) return false;
+  const destinationParts = destinationFolder.split("/").filter(Boolean);
+  if (destinationParts.length !== 1) return false;
+  const sourceFolders = sourceRelativePath.replaceAll("\\", "/").split("/").filter(Boolean).slice(0, -1);
+  if (!sourceFolders.length) return false;
+  // A hierarchy is treated as unstructured only when *every* folder in the
+  // chain is a staging bucket, never when a named client/project contains one.
+  return !sourceFolders.every((folder) => stagingFolderPattern.test(folder.trim()));
+}
+
+// A nested destination is a real client/project scope, not merely a topic.
+// Shared clinical vocabulary cannot justify crossing either named ancestor.
+export function archiveOwnerScope(relativePath: string) {
+  const [section, owner] = relativePath.replaceAll("\\", "/").split("/").filter(Boolean);
+  return (section === "00_EXISTING_ARCHIVE" || section === "08_DEEP_ARCHIVES") && owner
+    ? `${section}/${owner}` : null;
+}
+
+// This final publication gate applies to document, image, audio and video
+// proposals, not only the topic-rule generator. Human-approved destinations
+// remain reviewable; an archive's client boundary is never inferred from topics.
+export function archiveSuggestionPathAllowed(
+  sourceRelativePath: string,
+  proposedRelativePath: string | null | undefined,
+  approvedDestinations: string[] = [],
+) {
+  const ownerScope = archiveOwnerScope(sourceRelativePath);
+  if (!ownerScope || !proposedRelativePath) return true;
+  const destination = proposedRelativePath.replaceAll("\\", "/").replace(/^\/+/, "");
+  if (destination.startsWith(`${ownerScope}/`)) return true;
+  return approvedDestinations.some((folder) => {
+    const normalizedFolder = folder.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+    return normalizedFolder.length > 0 && destination.startsWith(`${normalizedFolder}/`);
+  });
+}
+
+export function crossesNamedOrganizationBoundary(sourceRelativePath: string, destinationFolder: string) {
+  const source = sourceRelativePath.replaceAll("\\", "/").split("/").filter(Boolean).slice(0, -1);
+  const destination = destinationFolder.replaceAll("\\", "/").split("/").filter(Boolean);
+  if (destination.length < 2) return false;
+  return source[0] !== destination[0] ||
+    (source.length >= 2 && source[1] !== destination[1]);
+}
+
 function moveAndFolderDrafts(context: SuggestionContext) {
   const best = bestRuleFor(context);
 
@@ -1605,10 +1799,40 @@ function moveAndFolderDrafts(context: SuggestionContext) {
   }
 
   const destinationFolder = establishedFolder?.folder ?? best.rule.folder;
+  const approvedPreference = context.approvedPreferences.find((preference) =>
+    normalizeText(preference.destinationRelativePath) === normalizeText(destinationFolder),
+  );
+  const earlierRelated = context.earlierRelationships
+    .filter((relationship) => relationship.supportingTopics.includes(best.rule.id) ||
+      (best.rule.id === "workshops" && relationship.relationshipKind === "SAME_WORKSHOP"))
+    .slice(0, 2);
   const currentFolder = folderFromRelativePath(context.currentRelativePath);
+  // Generic clinical subject words do not establish a destination. An
+  // established folder or separately approved preference is required before
+  // proposing a new broad Clinical Tools move.
+  if (best.rule.id === "clinical-tools" && !establishedFolder && !approvedPreference) {
+    return [];
+  }
+  // Preserve scope and depth: shared subjects are not specific destination
+  // evidence for an unrelated client or a flattened established archive.
+  const sourceFolderCount = context.currentRelativePath.split("/").filter(Boolean).length - 1;
+  const destinationFolderCount = destinationFolder.split("/").filter(Boolean).length;
+  if (!approvedPreference && (
+    crossesNamedOrganizationBoundary(context.currentRelativePath, destinationFolder) ||
+    (sourceFolderCount >= 3 && destinationFolderCount < sourceFolderCount)
+  )) return [];
+  if (suppressBroadCategoryMove(
+    context.currentRelativePath,
+    destinationFolder,
+    Boolean(approvedPreference),
+  )) return [];
   const proposedRelativePath = joinRelativePath(destinationFolder, context.fileName);
   const drafts: SuggestionDraft[] = [];
   const matchedConcepts = best.directMatches.join(", ");
+  const sourceLocations = sourceLocationsForRecommendation(
+    context.contentText,
+    best.directMatches,
+  );
   const folderEvidence = establishedFolder
     ? `${establishedFolder.fileCount} existing files are already stored under ${establishedFolder.folder}.`
     : clusterSupport
@@ -1622,20 +1846,24 @@ function moveAndFolderDrafts(context: SuggestionContext) {
     drafts.push(
       makeDraft(context, {
         confidence:
-          0.68 +
-          Math.min(best.directMatches.length, 4) * 0.02 +
-          (clusterSupport ? 0.04 : 0),
-        evidenceStrength: "STRONG",
+          best.rule.id === "clinical-tools" && !approvedPreference
+            ? 0.66
+            : 0.68 +
+              Math.min(best.directMatches.length, 4) * 0.02 +
+              (clusterSupport ? 0.04 : 0),
+        evidenceStrength: best.rule.id === "clinical-tools" && !approvedPreference
+          ? "SUPPORTED" : "STRONG",
         explanation: `The readable or reviewed content repeatedly supports ${matchedConcepts}. There is no established matching folder in this scan, so creating ${best.rule.folder} is presented only as a dependency of the proposed move.`,
         proposedRelativePath: normalizeBridgeRelativePath(destinationFolder),
         suggestionType: "CREATE_FOLDER",
         title: `Consider a ${best.rule.folder} folder`,
         whySuggested: [
           best.rule.explanation,
-          `Content concepts: ${matchedConcepts}`,
+          formatOrganizationConcepts(best.directMatches),
         ],
         supportingInformation: [
           folderEvidence,
+          ...sourceLocations,
           ...(clusterSupport
             ? clusterSupport.relatedPaths
                 .slice(0, 3)
@@ -1653,22 +1881,26 @@ function moveAndFolderDrafts(context: SuggestionContext) {
   if (normalizeText(currentFolder) !== normalizeText(destinationFolder)) {
     drafts.push(
       makeDraft(context, {
-        confidence:
-          0.68 +
-          Math.min(best.directMatches.length, 4) * 0.02 +
-          (establishedFolder ? 0.04 : 0) +
-          (clusterSupport ? 0.04 : 0),
-        evidenceStrength: "STRONG",
+        confidence: best.rule.id === "clinical-tools" && destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+          ? 0.66 // Topic evidence is not independent proof of destination authority.
+          : 0.68 +
+            Math.min(best.directMatches.length, 4) * 0.02 +
+            (establishedFolder ? 0.04 : 0) +
+            (clusterSupport ? 0.04 : 0),
+        evidenceStrength: best.rule.id === "clinical-tools" && destinationFolder.split("/").filter(Boolean).length === 1 && !approvedPreference
+          ? "SUPPORTED"
+          : "STRONG",
         explanation: `The readable or reviewed content includes the related concepts ${matchedConcepts}. ${folderEvidence} Together, that evidence supports reviewing ${destinationFolder} as a destination.`,
         proposedRelativePath,
         suggestionType: "MOVE_FILE",
         title: `Consider placing this with ${best.rule.folder}`,
         whySuggested: [
           best.rule.explanation,
-          `Content concepts: ${matchedConcepts}`,
+          formatOrganizationConcepts(best.directMatches),
         ],
         supportingInformation: [
           folderEvidence,
+          ...sourceLocations,
           ...(clusterSupport
             ? clusterSupport.relatedPaths
                 .slice(0, 3)
@@ -1680,6 +1912,12 @@ function moveAndFolderDrafts(context: SuggestionContext) {
           ...(best.memoryScore > 0
             ? ["Approved Memory corroborates this topic classification."]
             : []),
+          ...(approvedPreference
+            ? [`A separately approved organization preference for ${approvedPreference.scopeTerms.join(" and ")} supports this destination within this connected library.`]
+            : []),
+          ...earlierRelated.map((relationship) =>
+            `Earlier scan context: ${relationship.relativePath} ${relationship.relationshipKind === "SAME_WORKSHOP" ? "shared an explicit workshop marker" : "appeared related"}. This history did not count as current destination evidence.`
+          ),
         ],
       }),
     );
@@ -1776,7 +2014,7 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     }>
   >();
 
-  for (const file of context.siblingFiles) {
+  for (const file of context.index ? recommendationIndexedCandidates(context.index, [...semanticTerms], folderFromRelativePath(context.currentRelativePath)) : context.siblingFiles) {
     if (file.id === context.scannedFileId) {
       continue;
     }
@@ -1789,6 +2027,34 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     ];
 
     if (!folder || overlap.length === 0 || normalizeText(folder) === currentFolder) {
+      continue;
+    }
+
+    // Separate named client/project branches must not be proposed as
+    // destinations merely because their files share clinical vocabulary.
+    const sourceScope = context.currentRelativePath.split("/").filter(Boolean);
+    const targetScope = folder.split("/").filter(Boolean);
+    // A real client name repeated in the file's own title and content can
+    // identify a specific established owner destination from an unfiled intake
+    // bucket. Generic words or the candidate folder name alone cannot do so.
+    const ownerTokens = tokenize(path.posix.basename(folder));
+    const sourceTextTokens = new Set(tokenize(context.contentText));
+    const intakeRoot = sourceScope[0]?.toLowerCase() === "clients" ||
+      stagingFolderPattern.test(sourceScope[0] ?? "");
+    const fromUnfiledIntake = intakeRoot &&
+      sourceScope.slice(1, -1).every((part) => stagingFolderPattern.test(part));
+    const concreteOwnerMatch = fromUnfiledIntake && targetScope.length === 1 &&
+      ownerTokens.length === 1 && sourceFileNameTerms.has(ownerTokens[0]!) &&
+      sourceTextTokens.has(ownerTokens[0]!);
+    if (targetScope.length >= 2 &&
+        (sourceScope[0] !== targetScope[0] ||
+         (sourceScope.length >= 3 && sourceScope[1] !== targetScope[1])) &&
+        !concreteOwnerMatch) {
+      continue;
+    }
+    // Unrelated named archives must remain intact; a genuinely evidenced
+    // owner-name match from an intake queue may still be considered.
+    if (suppressBroadCategoryMove(context.currentRelativePath, folder) && !concreteOwnerMatch) {
       continue;
     }
 
@@ -1860,7 +2126,7 @@ function groupWithFilesDraft(context: SuggestionContext, topTerms: string[]) {
     title: `Review this with related files in ${candidate.folder}`,
     whySuggested: [
       "The proposed folder is supported by content meaning and an existing file pattern.",
-      `Specific shared concepts: ${sharedTerms.join(", ")}`,
+      formatOrganizationConcepts(sharedTerms),
     ],
     supportingInformation: [
       patternDescription,
@@ -2248,12 +2514,54 @@ function duplicateSignals(
   return [...new Set(signals)];
 }
 
+async function recommendationAuthority(fileId: string, tx?: Prisma.TransactionClient) {
+  const prisma = tx ?? getPrismaClient();
+  return prisma.scannedFile.findUnique({ where: { id: fileId }, select: {
+    checksum: true, relativePath: true, lastModified: true, libraryDocumentId: true,
+    readingStatus: true, extractionStatus: true, sourceUnavailableAt: true,
+    audioMetadata: { select: { updatedAt: true } }, imageMetadata: { select: { updatedAt: true } }, videoMetadata: { select: { updatedAt: true } },
+    libraryDocument: { select: { observationSessions: { orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { id: true, status: true, humanDecisions: { orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: { id: true }, take: 1 } } } } },
+    organizationSuggestions: { orderBy: { id: "asc" }, where: { invalidatedAt: null },
+      select: { id: true, status: true, updatedAt: true } },
+  } });
+}
+
+async function recommendationMemory(analysisTerms: Set<string>, analysisText: string) {
+  const prisma = getPrismaClient();
+  type Row = { id: string; memoryType: string; title: string; description: string; evidence: Prisma.JsonValue;
+    occurrenceCount: number; lastSeen: Date };
+  const matches: Row[] = [], preferred: Row[] = [];
+  let cursor: Row | undefined;
+  do {
+    const page: Row[] = await prisma.$queryRaw(Prisma.sql`
+      SELECT memory.id, memory."memoryType", memory.title, memory.description, memory.evidence,
+        memory."occurrenceCount", memory."lastSeen" FROM "MemoryEntry" memory
+      WHERE ${eligibleMemorySql()} AND ${cursor ? Prisma.sql`
+        (memory."occurrenceCount", memory."lastSeen", memory.id) < (${cursor.occurrenceCount}::int, ${cursor.lastSeen.toISOString()}::timestamp, ${cursor.id})` : Prisma.sql`true`}
+      ORDER BY memory."occurrenceCount" DESC, memory."lastSeen" DESC, memory.id DESC LIMIT 200
+    `);
+    for (const entry of page) {
+      if (matches.length < 8 && activeMemoryMatches([entry], analysisTerms).length) matches.push(entry);
+      if (preferred.length < 8 && preferredTermsFromMemory([entry], analysisText).length) preferred.push(entry);
+    }
+    cursor = page.length === 200 ? page.at(-1) : undefined;
+  } while (cursor && (matches.length < 8 || preferred.length < 8));
+  return [...new Map([...matches, ...preferred].map((entry) => [entry.id, entry])).values()];
+}
+
 async function scannedFileContext(
   scannedFileId: string,
   contentText: string,
   workingKnowledge?: ScanWorkingKnowledgeIndex,
+  batchIndex?: RecommendationContextIndex,
 ) {
+  if (/^(?:Image technical metadata only|Audio review material|Video review material)/.test(contentText)) {
+    contentText = "";
+  }
   const prisma = getPrismaClient();
+  const authority = JSON.stringify(await recommendationAuthority(scannedFileId));
   const scannedFile = await prisma.scannedFile.findUnique({
     include: {
       audioMetadata: {
@@ -2306,8 +2614,14 @@ async function scannedFileContext(
         select: {
           id: true,
           observationSessions: {
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1,
             select: {
               explanation: true,
+              humanDecisions: {
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1,
+                where: { decisionType: { not: "NOTE" } },
+                select: { decisionType: true, editedSuggestion: true },
+              },
               interpretations: true,
               observations: true,
               planSuggestions: true,
@@ -2329,37 +2643,7 @@ async function scannedFileContext(
               platform: true,
             },
           },
-          scannedFiles: {
-            select: {
-              audioMetadata: {
-                select: {
-                  audioFingerprint: true,
-                  durationSeconds: true,
-                },
-              },
-              imageMetadata: {
-                select: {
-                  height: true,
-                  imageFingerprint: true,
-                  width: true,
-                },
-              },
-              videoMetadata: {
-                select: {
-                  durationSeconds: true,
-                  height: true,
-                  videoFingerprint: true,
-                  width: true,
-                },
-              },
-              checksum: true,
-              fileType: true,
-              id: true,
-              localPath: true,
-              relativePath: true,
-              sizeBytes: true,
-            },
-          },
+
         },
       },
     },
@@ -2408,18 +2692,21 @@ async function scannedFileContext(
     reviewedObservationText: reviewedText,
   });
   const analysisTerms = new Set(tokenize(analysisText));
-  const memoryEntries = await prisma.memoryEntry.findMany({
-    orderBy: [{ occurrenceCount: "desc" }, { lastSeen: "desc" }],
-    take: 80,
-    where: {
-      status: "ACTIVE",
-    },
-  });
+  const memoryEntries = await recommendationMemory(analysisTerms, analysisText);
   const memoryMatches = activeMemoryMatches(memoryEntries, analysisTerms);
+  const approvedPreferences = await applicableApprovedPreferences({
+    connectedLibraryId: scannedFile.scanSession.connectedFolder.id,
+    contentText,
+  });
+  const earlierRelationships = await earlierRelationshipContext({
+    checksum: scannedFile.checksum,
+    connectedLibraryId: scannedFile.scanSession.connectedFolder.id,
+    relativePath: scannedFile.relativePath,
+    scanStartedAt: scannedFile.scanSession.startedAt,
+  });
   const preferredTerms = preferredTermsFromMemory(memoryEntries, analysisText);
-  const exactDuplicate = await findExactChecksumDuplicateForScannedFile(
-    scannedFile.id,
-  );
+  const exactDuplicate = batchIndex?.duplicateTargets ? batchIndex.duplicateTargets.get(scannedFile.id) ?? null
+    : await findExactChecksumDuplicateForScannedFile(scannedFile.id);
   const duplicateTargetIds = [
     exactDuplicate?.id,
     scannedFile.audioMetadata?.duplicateOfScannedFileId,
@@ -2473,9 +2760,7 @@ async function scannedFileContext(
             },
           },
           where: {
-            id: {
-              in: duplicateTargetIds,
-            },
+            id: { in: duplicateTargetIds }, scanSession: { connectedFolder: currentReadableRootWhere },
           },
         })
       : [];
@@ -2551,7 +2836,12 @@ async function scannedFileContext(
       : [];
   });
 
+  const index = batchIndex ?? await loadRecommendationContextIndex(scannedFile.sessionId, workingKnowledge);
+
   return {
+    index,
+    authority,
+    preferenceVersions: approvedPreferences.map(({ id, version }) => ({ id, version })),
     checksum: scannedFile.checksum,
     contentText,
     currentRelativePath: normalizeBridgeRelativePath(scannedFile.relativePath),
@@ -2559,37 +2849,25 @@ async function scannedFileContext(
     duplicateMatches,
     fileName: fileNameFromRelativePath(scannedFile.relativePath),
     fileType: scannedFile.fileType,
-    folderStructure: collectFolderStructure(
-      scannedFile.scanSession.scannedFiles.map((file) => file.relativePath),
-    ),
+    folderStructure: index.folderStructure,
     memoryMatches,
+    earlierRelationships,
+    approvedPreferences: approvedPreferences.map((preference) => ({
+      destinationRelativePath: preference.destinationRelativePath,
+      id: preference.id,
+      scopeTerms: Array.isArray(preference.scopeTerms)
+        ? preference.scopeTerms.filter((term): term is string => typeof term === "string")
+        : [],
+    })),
     preferredTerms,
     provisionalWorkingEvidence: provisionalText,
     reviewedObservationText: reviewedText,
     scanSessionId: scannedFile.sessionId,
     scannedFileId: scannedFile.id,
-    semanticClusters:
-      workingKnowledge?.clusters.filter((cluster) =>
-        cluster.memberFileIds.includes(scannedFile.id),
-      ) ?? [],
+    semanticClusters: index.clustersByFile.get(scannedFile.id) ?? [],
     semanticFiles: workingKnowledge?.files ?? [],
-    semanticRelationships:
-      workingKnowledge?.relationships.filter(
-        (relationship) =>
-          relationship.leftFileId === scannedFile.id ||
-          relationship.rightFileId === scannedFile.id,
-      ) ?? [],
-    siblingFiles: scannedFile.scanSession.scannedFiles.map((file) => ({
-      audioFingerprint: file.audioMetadata?.audioFingerprint ?? null,
-      checksum: file.checksum,
-      fileType: file.fileType,
-      imageFingerprint: file.imageMetadata?.imageFingerprint ?? null,
-      id: file.id,
-      localPath: file.localPath,
-      relativePath: file.relativePath,
-      sizeBytes: file.sizeBytes,
-      videoFingerprint: file.videoMetadata?.videoFingerprint ?? null,
-    })),
+    semanticRelationships: index.relationshipsByFile.get(scannedFile.id) ?? [],
+    siblingFiles: index.siblings,
     audioMetadata: scannedFile.audioMetadata
       ? {
           audioFingerprint: scannedFile.audioMetadata.audioFingerprint,
@@ -2680,7 +2958,7 @@ function newRecommendationGenerationId(context: SuggestionContext) {
 async function persistDrafts(
   context: SuggestionContext,
   drafts: SuggestionDraft[],
-  options: { replaceChecksumBootstrap?: boolean } = {},
+  options: { replaceChecksumBootstrap?: boolean; batchOwner?: RecommendationBatchOwner; signal?: AbortSignal } = {},
 ) {
   const prisma = getPrismaClient();
   const suggestions: BridgeOrganizationSuggestionSummary[] = [];
@@ -2690,12 +2968,29 @@ async function persistDrafts(
     context.currentRelativePath,
     drafts.map(cleanDraftPaths),
   );
+  const approvedDestinationPaths = context.approvedPreferences.map(
+    (preference) => preference.destinationRelativePath,
+  );
   const safeReconciledDrafts = reconciledDrafts.flatMap((draft) => {
+    const moveProposal = ["MOVE_FILE", "MOVE_AND_RENAME_FILE", "GROUP_WITH_FILES", "CREATE_FOLDER"]
+      .includes(draft.suggestionType);
+    if (moveProposal && !archiveSuggestionPathAllowed(
+      context.currentRelativePath, draft.proposedRelativePath, approvedDestinationPaths,
+    )) return [];
+    // Alternatives cannot smuggle a different archive owner's destination
+    // past the primary proposal's boundary check.
+    const safeDraft = {
+      ...draft,
+      alternatives: draft.alternatives.filter((alternative) =>
+        archiveSuggestionPathAllowed(
+          context.currentRelativePath, alternative.proposedRelativePath, approvedDestinationPaths,
+        )),
+    };
     if (draft.suggestionType !== "POSSIBLE_DUPLICATE") {
-      return [draft];
+      return [safeDraft];
     }
 
-    const duplicateEvidence = draft.duplicateEvidence.filter(
+    const duplicateEvidence = safeDraft.duplicateEvidence.filter(
       (match) =>
         !samePhysicalFilePresentation(
           {
@@ -2709,9 +3004,9 @@ async function persistDrafts(
     return duplicateEvidence.length > 0
       ? [
           {
-            ...draft,
+            ...safeDraft,
             duplicateEvidence,
-            supportingInformation: draft.supportingInformation.filter(
+            supportingInformation: safeDraft.supportingInformation.filter(
               (detail) =>
                 !draft.duplicateEvidence.some(
                   (match) =>
@@ -2747,6 +3042,24 @@ async function persistDrafts(
 
   await prisma.$transaction(
     async (transaction) => {
+      if (options.batchOwner) await lockRecommendationBatch(transaction, options.batchOwner, options.signal);
+      if (options.signal?.aborted) throw new OrganizationSuggestionError("Recommendation preparation was cancelled.", 409);
+      const file = await transaction.scannedFile.findFirst({ select: { id: true }, where: {
+        id: context.scannedFileId, scanSession: { connectedFolder: { ...currentReadableRootWhere, recommendationPermission: true } },
+      } });
+      if (file) await transaction.$executeRaw(Prisma.sql`UPDATE "ScannedFile" SET id = id WHERE id = ${context.scannedFileId}`);
+      if (!file || JSON.stringify(await recommendationAuthority(context.scannedFileId, transaction)) !== context.authority) {
+        throw new OrganizationSuggestionError("The source or its review changed during recommendation preparation. Retry with current information.", 409);
+      }
+      if (context.preferenceVersions.length) {
+        const valid = await transaction.organizationPreference.count({ where: { status: "APPROVED", disputedAt: null,
+          OR: context.preferenceVersions.map(({ id, version }) => ({ id, version })) } });
+        if (valid !== context.preferenceVersions.length) throw new OrganizationSuggestionError("An organization preference changed. Retry this recommendation.", 409);
+      }
+      await transaction.scannedFile.update({ data: {
+        processedAt: new Date(), processingErrorCategory: null,
+        processingStage: isImageFileType(context.fileType) ? "RECOMMENDATIONS_READY" : "SUGGESTIONS_GENERATED",
+      }, where: { id: context.scannedFileId } });
       const activeSuggestions = await transaction.organizationSuggestion.findMany({
         include: {
           revisions: {
@@ -2781,6 +3094,12 @@ async function persistDrafts(
           suggestion.recommendationGenerationId.startsWith("checksum-duplicates-"),
         );
 
+      if (activeSuggestions.some((suggestion) => normalizeSuggestionStatus(suggestion.status) !== "PENDING")) {
+        existingCount = activeSuggestions.length;
+        suggestions.push(...activeSuggestions.map(summarizeOrganizationSuggestion));
+        return; // Explicit confirmed regeneration owns invalidation of human decisions.
+      }
+
       if (
         hasOnlyCurrentPendingSuggestions &&
         !(options.replaceChecksumBootstrap && hasOnlyChecksumBootstrapSuggestions)
@@ -2805,6 +3124,9 @@ async function persistDrafts(
           scannedFileId: context.scannedFileId,
         },
       });
+
+      await disputePreferencesFromDecisions(activeSuggestions.filter((item) => item.status !== "PENDING")
+        .map((item) => item.id), transaction);
 
       if (cleanedDrafts.length > 0) {
         await transaction.organizationSuggestion.createMany({
@@ -2842,7 +3164,7 @@ async function persistDrafts(
       }
     },
     {
-      timeout: 15_000,
+      timeout: 120_000, isolationLevel: "Serializable",
     },
   );
 
@@ -2890,6 +3212,10 @@ export async function generateOrganizationSuggestionsForScannedFileWithText(
   options: {
     replaceChecksumBootstrap?: boolean;
     workingKnowledge?: ScanWorkingKnowledgeIndex;
+    beforePersist?: () => Promise<void>;
+    batchOwner?: RecommendationBatchOwner;
+    signal?: AbortSignal;
+    contextIndex?: RecommendationContextIndex;
   } = {},
 ) {
   const prisma = getPrismaClient();
@@ -2939,23 +3265,14 @@ export async function generateOrganizationSuggestionsForScannedFileWithText(
     scannedFileId,
     contentText,
     options.workingKnowledge,
+    options.contextIndex,
   );
   const drafts = buildDrafts(context);
+  await options.beforePersist?.();
   const result = await persistDrafts(context, drafts, {
     replaceChecksumBootstrap: options.replaceChecksumBootstrap,
-  });
-
-  await prisma.scannedFile.update({
-    data: {
-      processedAt: new Date(),
-      processingErrorCategory: null,
-      processingStage: isImageFileType(context.fileType)
-        ? "RECOMMENDATIONS_READY"
-        : "SUGGESTIONS_GENERATED",
-    },
-    where: {
-      id: scannedFileId,
-    },
+    batchOwner: options.batchOwner,
+    signal: options.signal,
   });
 
   return {
@@ -3118,7 +3435,7 @@ export async function getOrganizationSuggestionsForScanSession(
 
 export async function prepareOrganizationRecommendationRegeneration(
   scanSessionId: string,
-  options: { confirmedReviewedDecisions?: boolean } = {},
+  options: { confirmedReviewedDecisions?: boolean; resetRemoteReads?: boolean; invalidateRecommendations?: boolean } = {},
 ) {
   const prisma = getPrismaClient();
   const normalizedScanSessionId = scanSessionId.trim();
@@ -3130,64 +3447,93 @@ export async function prepareOrganizationRecommendationRegeneration(
     );
   }
 
-  const session = await prisma.scanSession.findUnique({
-    select: {
-      id: true,
-      organizationSuggestions: {
-        select: {
-          id: true,
-          status: true,
-        },
-        where: {
-          invalidatedAt: null,
+  return prisma.$transaction(async (tx) => {
+    const binding = await tx.scanSession.findUniqueOrThrow({ include: { connectedFolder: true }, where: { id: normalizedScanSessionId } });
+    if (binding.connectedFolder.bridgeDeviceId) {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM "BridgeDevice" WHERE "bridgeDeviceId" = ${binding.connectedFolder.bridgeDeviceId} FOR SHARE`);
+    }
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "ConnectedFolder" WHERE id = ${binding.connectedFolderId} FOR SHARE`);
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "ScanSession" WHERE id = ${normalizedScanSessionId} FOR UPDATE`);
+    const fresh = await tx.scanSession.findFirst({ include: { connectedFolder: { include: { bridgeDevice: true } } }, where: {
+      id: normalizedScanSessionId, connectedFolder: { ...currentReadableRootWhere, recommendationPermission: true },
+    } });
+    if (!fresh || fresh.connectedFolder.bridgeDevice?.revokedAt || fresh.connectedFolder.bridgeDevice?.status === "REVOKED") {
+      throw new OrganizationSuggestionError("Reconnect this readable folder before preparing recommendations.", 409);
+    }
+    if (options.resetRemoteReads && fresh.recommendationRegenerationGeneration && fresh.status === "READING") {
+      return { reviewedRecommendationCount: 0, supersededRecommendationCount: 0 };
+    }
+    if (await tx.executionRun.count({ where: { ...blockingPlanExecutionWhere, organizationPlan: { scanSessionId: normalizedScanSessionId } } }) ||
+        await tx.scannedFile.count({ where: { sessionId: normalizedScanSessionId, observationClaimedAt: { not: null } } }) ||
+        (fresh.recommendationLeaseUntil && fresh.recommendationLeaseUntil > new Date())) {
+      throw new OrganizationSuggestionError("Wait for the active read, recommendation, or execution to finish before regeneration.", 409);
+    }
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "OrganizationSuggestion" WHERE "scanSessionId" = ${normalizedScanSessionId}
+      AND "invalidatedAt" IS NULL ORDER BY id FOR UPDATE`);
+    const session = await tx.scanSession.findUnique({
+      select: {
+        id: true,
+        organizationSuggestions: {
+          select: {
+            id: true,
+            status: true,
+          },
+          where: {
+            invalidatedAt: null,
+          },
         },
       },
-    },
-    where: {
-      id: normalizedScanSessionId,
-    },
-  });
-
-  if (!session) {
-    throw new OrganizationSuggestionError(
-      "The Librarian could not find that scan session.",
-      404,
-    );
-  }
-
-  const reviewedRecommendationCount = session.organizationSuggestions.filter(
-    (suggestion) => normalizeSuggestionStatus(suggestion.status) !== "PENDING",
-  ).length;
-
-  if (reviewedRecommendationCount > 0 && !options.confirmedReviewedDecisions) {
-    throw new OrganizationSuggestionError(
-      "This scan has reviewed recommendations. Confirm regeneration to keep those decisions in history and prepare a new set for review.",
-      409,
-    );
-  }
-
-  const invalidatedAt = new Date();
-  const superseded = await prisma.organizationSuggestion.updateMany({
-    data: {
-      invalidatedAt,
-      invalidatedReason:
-        reviewedRecommendationCount > 0
-          ? "This recommendation was retained in history after Deanne confirmed a new recommendation pass."
-          : "This pending recommendation was superseded by a new recommendation pass.",
-    },
-    where: {
-      id: {
-        in: session.organizationSuggestions.map((suggestion) => suggestion.id),
+      where: {
+        id: normalizedScanSessionId,
       },
-      invalidatedAt: null,
-      scanSessionId: normalizedScanSessionId,
-    },
-  });
+    });
 
-  return {
-    reviewedRecommendationCount,
-    supersededRecommendationCount: superseded.count,
-  };
+    if (!session) {
+      throw new OrganizationSuggestionError(
+        "The Librarian could not find that scan session.",
+        404,
+      );
+    }
+
+    const reviewedRecommendationCount = session.organizationSuggestions.filter(
+      (suggestion) => normalizeSuggestionStatus(suggestion.status) !== "PENDING",
+    ).length;
+
+    if (options.invalidateRecommendations !== false && reviewedRecommendationCount > 0 && !options.confirmedReviewedDecisions) {
+      throw new OrganizationSuggestionError(
+        "This scan has reviewed recommendations. Confirm regeneration to keep those decisions in history and prepare a new set for review.",
+        409,
+      );
+    }
+
+    const invalidatedAt = new Date();
+    const superseded = options.invalidateRecommendations === false ? { count: 0 } : await tx.organizationSuggestion.updateMany({
+      data: { invalidatedAt, invalidatedReason: reviewedRecommendationCount > 0
+        ? "This recommendation was retained in history after Deanne confirmed a new recommendation pass."
+        : "This pending recommendation was superseded by a new recommendation pass." },
+      where: { invalidatedAt: null, scanSessionId: normalizedScanSessionId },
+    });
+    if (options.invalidateRecommendations !== false) {
+      const reviewedIds = session.organizationSuggestions.filter((suggestion) => suggestion.status !== "PENDING").map((suggestion) => suggestion.id);
+      for (let offset = 0; offset < reviewedIds.length; offset += 500) await disputePreferencesFromDecisions(reviewedIds.slice(offset, offset + 500), tx);
+    }
+    if (options.resetRemoteReads) {
+      await tx.scannedFile.updateMany({ data: {
+        extractedAt: null, extractionErrorCategory: null, extractionStatus: "PENDING",
+        processedAt: invalidatedAt, processingErrorCategory: null, processingStage: "DISCOVERED", readingStatus: "NOT_READ", scanError: null,
+      }, where: { sessionId: normalizedScanSessionId, readStatus: "SUPPORTED", sourceUnavailableAt: null,
+        extractionStatus: { not: "FAILED" }, processingStage: { notIn: ["FAILED", "UNSUPPORTED"] }, readingStatus: { not: "FAILED" },
+        organizationSuggestions: { none: { invalidatedAt: null, recommendationGenerationVersion: currentRecommendationGenerationVersion } },
+      } });
+      await tx.scanSession.update({ data: { status: "READING", completedAt: null,
+        recommendationGeneration: null, recommendationLeaseUntil: null, recommendationRegenerationGeneration: randomUUID() }, where: { id: normalizedScanSessionId } });
+    }
+
+    return {
+      reviewedRecommendationCount,
+      supersededRecommendationCount: superseded.count,
+    };
+  }, { isolationLevel: "Serializable", timeout: 120_000 });
 }
 
 export async function getOrganizationSuggestionsForConnectedLibraries(take = 160) {
@@ -3210,9 +3556,10 @@ export async function getOrganizationSuggestionsForConnectedLibraries(take = 160
         },
       },
     },
-    orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+    orderBy: [{ status: "asc" }, { createdAt: "desc" }, { id: "desc" }],
     take,
     where: {
+      scanSession: { connectedFolder: currentReadableRootWhere },
       invalidatedAt: null,
       recommendationGenerationVersion: currentRecommendationGenerationVersion,
     },
@@ -3493,26 +3840,62 @@ export async function reviewOrganizationSuggestion(
           suggestionId,
         },
       });
+      await transaction.organizationSuggestionDecisionEvent.create({
+        data: {
+          action: input.action,
+          context,
+          destination: revision.revisedRelativePath,
+          nextStatus,
+          previousStatus: currentStatus,
+          scanSessionId,
+          suggestionId,
+        },
+      });
     });
   } else {
     assertPendingReviewStatus(currentStatus);
 
-    const updated = await prisma.organizationSuggestion.updateMany({
-      data: {
-        reviewedAt: new Date(),
-        status: nextStatus,
-      },
-      where: {
-        id: suggestionId,
-        invalidatedAt: null,
-        recommendationGenerationId: existing.recommendationGenerationId,
-        recommendationGenerationVersion: currentRecommendationGenerationVersion,
-        scanSessionId,
-        status: "PENDING",
-      },
+    await prisma.$transaction(async (transaction) => {
+      const updated = await transaction.organizationSuggestion.updateMany({
+        data: {
+          reviewedAt: new Date(),
+          status: nextStatus,
+        },
+        where: {
+          id: suggestionId,
+          invalidatedAt: null,
+          recommendationGenerationId: existing.recommendationGenerationId,
+          recommendationGenerationVersion: currentRecommendationGenerationVersion,
+          scanSessionId,
+          status: "PENDING",
+        },
+      });
+      await assertReviewUpdateSucceeded(suggestionId, scanSessionId, updated.count);
+      await transaction.organizationSuggestionDecisionEvent.create({
+        data: {
+          action: input.action,
+          context,
+          destination: existing.proposedRelativePath,
+          nextStatus,
+          previousStatus: currentStatus,
+          scanSessionId,
+          suggestionId,
+        },
+      });
     });
+  }
 
-    await assertReviewUpdateSucceeded(suggestionId, scanSessionId, updated.count);
+  if ((nextStatus === "APPROVED" || nextStatus === "MODIFIED") &&
+      (existing.suggestionType === "MOVE_FILE" || existing.suggestionType === "GROUP_WITH_FILES")) {
+    try {
+      const session = await prisma.scanSession.findUnique({
+        select: { connectedFolderId: true },
+        where: { id: scanSessionId },
+      });
+      if (session) await proposeOrganizationPreferences(session.connectedFolderId);
+    } catch {
+      // A preference proposal is advisory and must not reverse a saved human decision.
+    }
   }
 
   const updated = await storedSuggestionById(suggestionId);
@@ -3541,46 +3924,24 @@ export async function resetOrganizationSuggestionDecision(
     );
   }
 
-  const existing = await storedSuggestionById(suggestionId);
-
-  if (!existing) {
-    throw new OrganizationSuggestionError(
-      "The Librarian could not find that organization suggestion.",
-      404,
-    );
-  }
-
-  if (existing.scanSessionId !== normalizedScanSessionId) {
-    throw new OrganizationSuggestionError(
-      "The Librarian could not find that recommendation in this scan session.",
-      404,
-    );
-  }
-
-  if (normalizeSuggestionStatus(existing.status) !== "PENDING") {
-    await prisma.$transaction([
-      prisma.organizationSuggestion.update({
-        data: {
-          reviewedAt: null,
-          status: "PENDING",
-        },
-        where: {
-          id: suggestionId,
-        },
-      }),
-      prisma.organizationPlan.updateMany({
-        data: {
-          status: "CANCELLED",
-        },
-        where: {
-          scanSessionId: normalizedScanSessionId,
-          status: {
-            in: ["DRAFT", "READY_FOR_EXECUTION"],
-          },
-        },
-      }),
-    ]);
-  }
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.organizationSuggestion.findUnique({ where: { id: suggestionId } });
+    if (!existing || existing.scanSessionId !== normalizedScanSessionId) {
+      throw new OrganizationSuggestionError("The Librarian could not find that recommendation in this scan session.", 404);
+    }
+    if (existing.invalidatedAt) throw new OrganizationSuggestionError("This recommendation is historical.", 409);
+    if (normalizeSuggestionStatus(existing.status) === "PENDING") return;
+    await tx.organizationSuggestion.update({ data: { reviewedAt: null, status: "PENDING" }, where: { id: suggestionId } });
+    await tx.organizationPlan.updateMany({ data: { status: "CANCELLED" }, where: {
+      scanSessionId: normalizedScanSessionId, status: { in: ["DRAFT", "READY_FOR_EXECUTION"] },
+        executionRuns: { none: blockingPlanExecutionWhere },
+    } });
+    await tx.organizationSuggestionDecisionEvent.create({ data: {
+      action: "RESET", nextStatus: "PENDING", previousStatus: existing.status,
+      scanSessionId: normalizedScanSessionId, suggestionId,
+    } });
+    await disputePreferencesFromDecisions([suggestionId], tx);
+  }, { isolationLevel: "Serializable", timeout: 120_000 });
 
   await recordChecksumDuplicateSuggestionsForSession(normalizedScanSessionId);
 
@@ -3625,31 +3986,22 @@ export async function resetOrganizationSuggestionDecisionsForScanSession(
     );
   }
 
-  const [cancelledPlans, result] = await prisma.$transaction([
-    prisma.organizationPlan.updateMany({
-      data: {
-        status: "CANCELLED",
-      },
-      where: {
-        scanSessionId: normalizedScanSessionId,
-        status: {
-          in: ["DRAFT", "READY_FOR_EXECUTION"],
-        },
-      },
-    }),
-    prisma.organizationSuggestion.updateMany({
-      data: {
-        reviewedAt: null,
-        status: "PENDING",
-      },
-      where: {
-        scanSessionId: normalizedScanSessionId,
-        status: {
-          not: "PENDING",
-        },
-      },
-    }),
-  ]);
+  const { cancelledPlans, result } = await prisma.$transaction(async (tx) => {
+    const reviewed = await tx.organizationSuggestion.findMany({ select: { id: true, status: true },
+      where: { scanSessionId: normalizedScanSessionId, invalidatedAt: null, status: { not: "PENDING" } } });
+    const cancelledPlans = await tx.organizationPlan.updateMany({ data: { status: "CANCELLED" }, where: {
+      scanSessionId: normalizedScanSessionId, status: { in: ["DRAFT", "READY_FOR_EXECUTION"] },
+        executionRuns: { none: blockingPlanExecutionWhere },
+    } });
+    const result = await tx.organizationSuggestion.updateMany({ data: { reviewedAt: null, status: "PENDING" },
+      where: { id: { in: reviewed.map((item) => item.id) }, invalidatedAt: null, status: { not: "PENDING" } } });
+    await tx.organizationSuggestionDecisionEvent.createMany({ data: reviewed.map((item) => ({
+      action: "RESET", nextStatus: "PENDING", previousStatus: item.status,
+      scanSessionId: normalizedScanSessionId, suggestionId: item.id,
+    })) });
+    await disputePreferencesFromDecisions(reviewed.map((item) => item.id), tx);
+    return { cancelledPlans, result };
+  }, { isolationLevel: "Serializable", timeout: 120_000 });
 
   await recordChecksumDuplicateSuggestionsForSession(normalizedScanSessionId);
 

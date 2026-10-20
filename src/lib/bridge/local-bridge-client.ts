@@ -13,6 +13,7 @@ export type LocalBridgeHealth = {
   status:
     | "BRIDGE_UNAVAILABLE"
     | "BRIDGE_READY"
+    | "BRIDGE_NOT_PAIRED"
     | "FOLDER_SELECTION_IN_PROGRESS";
   platform: string | null;
   version: string | null;
@@ -30,6 +31,7 @@ export type LocalBridgeFolderSelection = {
 };
 
 export type LocalBridgeRootSummary = ConnectedLibraryPermissions & {
+  connectionRevision?: number;
   id: string;
   displayName: string;
   safeLocation: string;
@@ -108,6 +110,7 @@ export type LocalBridgeExecutionResult = {
 
 export type LocalBridgeUndoActionInput = {
   id: string;
+  originalExecutionActionId?: string;
   actionType: "REMOVE_FOLDER" | "MOVE_FILE" | "RENAME_FILE";
   sourceRelativePath: string;
   sourceChecksum?: string | null;
@@ -243,13 +246,13 @@ export async function getLocalBridgeHealth(): Promise<LocalBridgeHealth> {
       ok: true;
       paired: boolean;
       platform: string;
-      status: "BRIDGE_READY";
+      status: "BRIDGE_READY" | "BRIDGE_NOT_PAIRED";
       version: string;
     }>(response);
 
     return {
-      message: "Bridge ready",
-      ok: true,
+      message: payload.paired ? "Bridge ready" : "Bridge running but not paired",
+      ok: payload.paired,
       paired: payload.paired,
       platform: payload.platform,
       status: payload.status,
@@ -546,12 +549,13 @@ export async function previewLocalBridgeExecution(
 export async function executeLocalBridgeActions(
   bridgeRootId: string,
   actions: LocalBridgeExecutionActionInput[],
+  expectedRootRevision?: number,
 ) {
   const response = await fetchWithTimeout(
     `/bridge/v1/roots/${encodeURIComponent(bridgeRootId)}/execute`,
     {
       authenticated: true,
-      body: serializeBody({ actions }),
+      body: serializeBody({ actions, expectedRootRevision }),
       method: "POST",
       timeoutMs: 120_000,
     },
@@ -562,6 +566,16 @@ export async function executeLocalBridgeActions(
   }>(response);
 
   return payload.execution;
+}
+
+// Authenticated historical outcome recovery; the native endpoint cannot admit effects.
+export async function recoverLocalBridgePhysicalActions(bridgeRootId: string,
+  actions: Array<LocalBridgeExecutionActionInput | LocalBridgeUndoActionInput>, undo: boolean) {
+  const response = await fetchWithTimeout(`/bridge/v1/roots/${encodeURIComponent(bridgeRootId)}/physical-recovery`, {
+    authenticated: true, body: serializeBody({ actions, undo }), method: "POST", timeoutMs: 120_000,
+  });
+  const payload = await readPayload<{ ok: true; recovery: { actions: LocalBridgeExecutionResult["actions"] } }>(response);
+  return payload.recovery;
 }
 
 export async function previewLocalBridgeUndo(
@@ -588,12 +602,13 @@ export async function previewLocalBridgeUndo(
 export async function executeLocalBridgeUndoActions(
   bridgeRootId: string,
   actions: LocalBridgeUndoActionInput[],
+  expectedRootRevision?: number,
 ) {
   const response = await fetchWithTimeout(
     `/bridge/v1/roots/${encodeURIComponent(bridgeRootId)}/undo`,
     {
       authenticated: true,
-      body: serializeBody({ actions }),
+      body: serializeBody({ actions, expectedRootRevision }),
       method: "POST",
       timeoutMs: 120_000,
     },

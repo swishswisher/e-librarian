@@ -37,9 +37,13 @@ export function effectiveBridgeHealth(
   devices: BridgeDeviceSummary[],
   now = new Date(),
 ): LocalBridgeHealth {
-  return localBridgeHealth.ok
-    ? localBridgeHealth
-    : cloudBridgeHealth(devices, now);
+  // A local Bridge can be paired to a different account or server. Only
+  // devices authorized by this web account can attest cloud readiness.
+  const cloud = cloudBridgeHealth(devices, now);
+  if (localBridgeHealth.status === "BRIDGE_NOT_PAIRED" && !cloud.ok) {
+    return localBridgeHealth;
+  }
+  return cloud;
 }
 
 export function cloudBridgeHealth(

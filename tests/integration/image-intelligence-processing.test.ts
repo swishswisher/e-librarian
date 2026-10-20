@@ -528,6 +528,78 @@ test("processes scanned images through image intelligence without treating damag
   assert.equal(retrySuggestionCount, suggestionCountBefore);
 });
 
+test("clinical topics do not flatten organized client and archive hierarchies in basic mode", async () => {
+  const files = new Map([
+    ["00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Restorative_Practices/RPR_03_Participant_worksheet.md",
+      "A clinical worksheet for a client. These clinical practice exercises support supervised client practice and learning."],
+    ["08_DEEP_ARCHIVES/HFA/Dialogue_Samples/RPR_Session_1.txt",
+      "A clinical worksheet and client practice exercise for reviewing safe dialogue and reflection."],
+    ["01_MIXED_INBOX/Downloads/Document_005_untitled.txt",
+      "A clinical worksheet with practice exercises for clients needing reflective support and learning."],
+  ]);
+  const { libraryRoot, sessionId } = await createBridgeBackedTextLibrary(files);
+  const originals = await listRelativeFiles(libraryRoot);
+  await processBridgeScanSession(sessionId, { recordNotebook: false });
+  for (const relativePath of [...files.keys()].filter(p => !p.includes("MIXED_INBOX"))) {
+    const source = await storedFile(sessionId, relativePath);
+    assert.equal(source.organizationSuggestions.some(s =>
+      s.invalidatedAt === null && s.suggestionType === "MOVE_FILE" &&
+      s.proposedRelativePath?.startsWith("Clinical Tools/")), false,
+      `A broad clinical topic cannot flatten established context: ${relativePath}`);
+  }
+  const inbox = await storedFile(sessionId, "01_MIXED_INBOX/Downloads/Document_005_untitled.txt");
+  assert.equal(inbox.organizationSuggestions.some(s =>
+    s.invalidatedAt === null && ["MOVE_FILE", "GROUP_WITH_FILES"].includes(s.suggestionType) &&
+    s.proposedRelativePath?.startsWith("Clinical Tools/")), false,
+    "A new generic Clinical Tools destination cannot be invented solely from clinical vocabulary.");
+  assert.deepEqual(await listRelativeFiles(libraryRoot), originals,
+    "Generating proposals must never mutate physical files.");
+});
+
+test("an established Clinical Tools folder can still receive cautious inbox suggestions", async () => {
+  const files = new Map([
+    ["Clinical Tools/cognitive-practice-guide.md",
+      "Clinical client worksheet practice guide with supervised exercises for learning reflection and wellbeing."],
+    ["Clinical Tools/reflective-session-template.md",
+      "A clinical client worksheet and guided practice exercise template for thoughtful wellbeing work."],
+    ["Downloads/new-client-worksheet.txt",
+      "A new client worksheet for structured clinical practice exercises, intended as a supervised teaching resource."],
+  ]);
+  const { libraryRoot, sessionId } = await createBridgeBackedTextLibrary(files);
+  const originals = await listRelativeFiles(libraryRoot);
+  await processBridgeScanSession(sessionId, { recordNotebook: false });
+  const inbox = await storedFile(sessionId, "Downloads/new-client-worksheet.txt");
+  const candidates = inbox.organizationSuggestions.filter(s =>
+    s.invalidatedAt === null && ["MOVE_FILE", "GROUP_WITH_FILES"].includes(s.suggestionType) &&
+    s.proposedRelativePath?.startsWith("Clinical Tools/"));
+  assert.ok(candidates.length >= 1,
+    "An existing, supported topic folder may remain a human-reviewed filing destination.");
+  assert.ok(candidates.every(s => s.confidence <= 0.66 && s.evidenceStrength !== "STRONG"),
+    "Generic clinical vocabulary alone is not strong destination authority.");
+  assert.deepEqual(await listRelativeFiles(libraryRoot), originals,
+    "Recommendations must never change the original files.");
+});
+
+test("an established Clinical Tools folder belonging to a different client cannot attract inbox files", async () => {
+  const files = new Map([
+    ["00_EXISTING_ARCHIVE/Solace_Lantern_Learning/Clinical Tools/session-guide.md",
+      "A clinical practice worksheet with client exercises and reflective learning in a named archive."],
+    ["00_EXISTING_ARCHIVE/Solace_Lantern_Learning/Clinical Tools/learning-template.md",
+      "A clinical practice template for client exercises and reflective worksheet sessions."],
+    ["01_MIXED_INBOX/Downloads/anonymous-worksheet.txt",
+      "A clinical practice worksheet and client exercise, without a verified link to Solace Lantern Learning."],
+  ]);
+  const { libraryRoot, sessionId } = await createBridgeBackedTextLibrary(files);
+  const originals = await listRelativeFiles(libraryRoot);
+  await processBridgeScanSession(sessionId, { recordNotebook: false });
+  const source = await storedFile(sessionId, "01_MIXED_INBOX/Downloads/anonymous-worksheet.txt");
+  assert.equal(source.organizationSuggestions.some(s =>
+    s.invalidatedAt === null && ["MOVE_FILE", "GROUP_WITH_FILES"].includes(s.suggestionType) &&
+    s.proposedRelativePath?.startsWith("00_EXISTING_ARCHIVE/Solace_Lantern_Learning/")), false,
+    "Destination topic overlap cannot establish a different organization's ownership.");
+  assert.deepEqual(await listRelativeFiles(libraryRoot), originals);
+});
+
 test("explicit regeneration revisits terminal files that no longer have current recommendations", async () => {
   const relativePath = "Archive/LetterFromMara.txt";
   const originalText =
@@ -549,6 +621,10 @@ test("explicit regeneration revisits terminal files that no longer have current 
   assert.equal(processedFile.processingStage, "SUGGESTIONS_GENERATED");
   assert.equal(firstObservationCount, 1);
   assert.equal(firstActiveSuggestions.length, 1);
+  // Examined files with valid current recommendations count as settled.
+  const originalProgress = await getBridgeScanSessionProgress(sessionId);
+  assert.equal(originalProgress?.progress.filesProcessed, 1);
+  assert.equal(originalProgress?.progress.remainingFiles, 0);
   assert.equal(
     firstActiveSuggestions[0]?.suggestionType,
     "INSUFFICIENT_EVIDENCE",
@@ -572,6 +648,7 @@ test("explicit regeneration revisits terminal files that no longer have current 
 
   assert.ok(progressAfterInvalidation);
   assert.equal(progressAfterInvalidation.progress.filesWithSuggestions, 0);
+  assert.equal(progressAfterInvalidation.progress.filesProcessed, 0);
   assert.equal(progressAfterInvalidation.progress.remainingFiles, 1);
 
   const regenerated = await processNextBridgeScanSessionFile(sessionId, {
@@ -579,6 +656,7 @@ test("explicit regeneration revisits terminal files that no longer have current 
   });
 
   assert.equal(regenerated.progress.filesWithSuggestions, 1);
+  assert.equal(regenerated.progress.filesProcessed, 1);
   assert.equal(regenerated.progress.remainingFiles, 0);
 
   const afterRegeneration = await storedFile(sessionId, relativePath);

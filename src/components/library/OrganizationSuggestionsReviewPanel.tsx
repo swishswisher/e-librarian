@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { recommendationMatchesOwnFilePath } from "@/lib/bridge/recommendation-path-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useRouter } from "next/navigation";
@@ -525,41 +526,13 @@ export function OrganizationSuggestionsReviewPanel({
           return true;
         }
 
-        return [
-          suggestion.title,
-          suggestion.currentRelativePath,
-          suggestion.proposedRelativePath,
-          suggestion.proposedFileName,
-          suggestion.explanation,
-          suggestion.whySuggested.join(" "),
-          suggestion.supportingInformation.join(" "),
-          suggestion.alternatives
-            .flatMap((alternative) => [
-              alternative.title,
-              alternative.proposedRelativePath,
-              alternative.proposedFileName,
-              alternative.explanation,
-            ])
-            .filter(Boolean)
-            .join(" "),
-          suggestion.duplicateEvidence
-            .flatMap((match) => [
-              match.connectedLibraryName,
-              match.relativePath,
-              ...match.signals,
-            ])
-            .join(" "),
-          libraryNameBySuggestionId[suggestion.id],
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .includes(query);
+        // Search the recommended source file, not evidence mentioning a
+        // different client's file or a proposed destination.
+        return recommendationMatchesOwnFilePath(suggestion, query);
       }),
     [
       activeFilter,
       libraryIdBySuggestionId,
-      libraryNameBySuggestionId,
       rows,
       searchQuery,
     ],

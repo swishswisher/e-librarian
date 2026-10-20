@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import { createBridgeServer } from "../src/api/server";
 import { readBridgeRootFile } from "../src/filesystem/reader";
 import { resolveBridgeRootFile } from "../src/filesystem/resolver";
 import { scanBridgeRoot } from "../src/filesystem/scanner";
+import { extractImageMetadata } from "../../src/lib/bridge/image-metadata";
 import { resolveInsideRoot } from "../src/filesystem/safety";
 import {
   createFolderSelection,
@@ -32,6 +34,7 @@ import {
   takeBridgeWatcherEvents,
 } from "../src/watcher/watcher";
 import { defaultBridgePermissions } from "../src/permissions/defaults";
+import { effectiveBridgeHealth } from "../../src/lib/bridge/effective-health";
 import { BridgeAppError, type BridgePermissions } from "../src/types";
 
 let tempRoot: string;
@@ -80,6 +83,14 @@ function mp3FrameBuffer() {
     Buffer.from([0xff, 0xfb, 0x90, 0x64]),
     Buffer.alloc(2048),
   ]);
+}
+
+function pngMetadataFixture(width = 640, height = 480) {
+  const buffer = Buffer.alloc(24);
+  Buffer.from("89504e470d0a1a0a", "hex").copy(buffer, 0);
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+  return buffer;
 }
 
 function atom(type: string, payload: Buffer) {
@@ -150,6 +161,37 @@ describe("NSN Bridge core", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it("reports local reachability without falsely claiming cloud pairing", async () => {
+    for (const paired of [false, true]) {
+      const server = createBridgeServer({ isCloudPaired: async () => paired });
+      const address = await new Promise<AddressInfo>((resolve) => {
+        server.listen(0, "127.0.0.1", () => resolve(server.address() as AddressInfo));
+      });
+      try {
+        const response = await fetch(`http://127.0.0.1:${address.port}/bridge/v1/health`);
+        assert.equal(response.status, 200);
+        const status = await response.json();
+        assert.equal(status.ok, true);
+        assert.equal(status.paired, paired);
+        assert.equal(status.status, paired ? "BRIDGE_READY" : "BRIDGE_NOT_PAIRED");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+  });
+
+  it("does not let cloud fallback overwrite an explicitly unpaired local Bridge", () => {
+    const local = {
+      ok: false,
+      paired: false,
+      status: "BRIDGE_NOT_PAIRED" as const,
+      platform: "darwin",
+      version: "0.1.test",
+      message: "Bridge running but not paired",
+    };
+    assert.deepEqual(effectiveBridgeHealth(local, []), local);
   });
 
   it("registers a root from a selection token and consumes the token", async () => {
@@ -566,6 +608,33 @@ describe("NSN Bridge core", () => {
     assert.equal(video.videoMetadata?.transcriptSnippet, null);
   });
 
+  it("rejects seven-byte malformed UTF-8 without inventing replacement text", async () => {
+    const folder = await makeSafeFolder("library-bad-utf8");
+    const root = await connectFolder(folder);
+    // Deliberately invalid UTF-8 followed by ASCII. The read must fail promptly.
+    await writeFile(path.join(folder, "garbled_utf8.txt"), Buffer.from([0xff, 0xfe, 0xc0, 0x80, 0xf5, 0x61, 0x62]));
+    await assert.rejects(
+      () => readBridgeRootFile(root.id, "garbled_utf8.txt"),
+      (error) => error instanceof BridgeAppError && error.code === "FILE_INVALID_ENCODING",
+    );
+    await writeFile(path.join(folder, "valid.txt"), "A valid follow-up document.");
+    const valid = await readBridgeRootFile(root.id, "valid.txt");
+    assert.equal(valid.extractedText, "A valid follow-up document.");
+  });
+
+  it("caps long temporary document text and reports partial analysis", async () => {
+    const folder = await makeSafeFolder("library-long-document");
+    const root = await connectFolder(folder);
+    const content = `${"Routine notes. ".repeat(150_000)}Late evidence.`;
+    await writeFile(path.join(folder, "long.txt"), content);
+
+    const read = await readBridgeRootFile(root.id, "long.txt");
+
+    assert.equal(read.characterCount, content.length);
+    assert.equal(read.extractedText.length, 2_000_000);
+    assert.ok(read.warnings.some((warning) => warning.includes("later content was not examined")));
+  });
+
   it("keeps damaged supported media in media-specific failure categories", async () => {
     const folder = await makeSafeFolder("library-media-damaged");
     const root = await connectFolder(folder);
@@ -584,6 +653,84 @@ describe("NSN Bridge core", () => {
       (error) =>
         error instanceof BridgeAppError &&
         error.code === "VIDEO_DECODE_FAILED",
+    );
+  });
+
+  it("rejects an unavailable native root instead of importing a false empty inventory", async () => {
+    const folder = await makeSafeFolder("library-removed-root");
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "worksheet.txt"), "Synthetic clinical worksheet.");
+    await rm(folder, { recursive: true, force: true });
+    await assert.rejects(() => scanBridgeRoot(root.id),
+      (error) => error instanceof BridgeAppError && error.code === "ROOT_UNAVAILABLE");
+  });
+
+  it("rejects a replaced root during native inventory without adopting replacement files", async () => {
+    const folder = await makeSafeFolder("library-root-replacement");
+    const root = await connectFolder(folder);
+    const preserved = `${folder}-preserved`;
+    await writeFile(path.join(folder, "source.png"), pngMetadataFixture());
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async () => {
+          await rename(folder, preserved);
+          await mkdir(folder);
+          await writeFile(path.join(folder, "replacement.txt"), "An unrelated synthetic file.");
+        },
+      }),
+      (error) => error instanceof BridgeAppError && error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+    assert.equal(await readFile(path.join(preserved, "source.png")).then(b => b.length), pngMetadataFixture().length);
+    await rm(preserved, { recursive: true, force: true });
+  });
+
+  it("scans a single supported .txt file and distinguishes genuinely empty roots", async () => {
+    const folder = await makeSafeFolder("library-single-file");
+    const root = await connectFolder(folder);
+    const empty = await scanBridgeRoot(root.id);
+    assert.equal(empty.totalFiles, 0);
+    assert.equal(empty.files.length, 0);
+
+    await writeFile(path.join(folder, "synthetic_client_worksheet.txt"), "Synthetic worksheet.\\n");
+    const scan = await scanBridgeRoot(root.id);
+    assert.equal(scan.totalFiles, 1);
+    assert.equal(scan.supportedFiles, 1);
+    assert.equal(scan.files[0].relativePath, "synthetic_client_worksheet.txt");
+    assert.equal(scan.files[0].fileType, "TEXT");
+    assert.equal(scan.files[0].readStatus, "SUPPORTED");
+    assert.equal(scan.files[0].checksum, createHash("sha256").update("Synthetic worksheet.\\n").digest("hex"));
+  });
+
+  it("rejects an in-place file replacement even when its relative path is unchanged", async () => {
+    const folder = await makeSafeFolder("library-inventory-same-path-race");
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "original.png"), pngMetadataFixture());
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async (filePath) => {
+          // This changes the inode's size/timestamps without changing the
+          // parent directory listing or replacing its filename.
+          await writeFile(filePath, Buffer.from("changed file content in place"));
+        },
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+  });
+
+  it("rejects a changed file inventory rather than publishing an incomplete scan", async () => {
+    const folder = await makeSafeFolder("library-inventory-race");
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "original.png"), pngMetadataFixture());
+
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async () => {
+          await writeFile(path.join(folder, "late.txt"), "New file during scanning.");
+        },
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
     );
   });
 
@@ -632,6 +779,72 @@ describe("NSN Bridge core", () => {
       byPath.get("Images/Website Candidates/becoming-workshop-hero.jpg")?.readStatus,
       "SUPPORTED",
     );
+  });
+
+  it("rejects image metadata when the bytes change during extraction", async () => {
+    const folder = await makeSafeFolder("library-image-scan-race");
+    const imagePath = path.join(folder, "changing.png");
+    const root = await connectFolder(folder);
+    await writeFile(imagePath, pngMetadataFixture());
+
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        imageMetadataExtractor: async (...args) => {
+          const metadata = await extractImageMetadata(...args);
+          await writeFile(imagePath, pngMetadataFixture(800, 600));
+          return metadata;
+        },
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+    const stable = await scanBridgeRoot(root.id);
+    assert.equal(stable.failedFiles, 0);
+    assert.equal(stable.supportedFiles, 1);
+    assert.equal(stable.files[0]?.readStatus, "SUPPORTED");
+    assert.equal(stable.files[0]?.checksum,
+      createHash("sha256").update(pngMetadataFixture(800, 600)).digest("hex"));
+  });
+
+  it("uses the replacement image stats when replacement happens before the checksum guard", async () => {
+    const folder = await makeSafeFolder("library-image-scan-pre-guard-replacement");
+    const imagePath = path.join(folder, "replaced.png");
+    const root = await connectFolder(folder);
+    await writeFile(imagePath, pngMetadataFixture());
+    const replacement = Buffer.concat([pngMetadataFixture(1024, 768), Buffer.alloc(37, 7)]);
+
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async () => writeFile(imagePath, replacement),
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+    // A fresh scan after the mutation settles verifies the new identity.
+    const scan = await scanBridgeRoot(root.id);
+    const image = scan.files[0];
+
+    assert.equal(image.readStatus, "SUPPORTED");
+    assert.equal(image.checksum, createHash("sha256").update(replacement).digest("hex"));
+    assert.equal(image.sizeBytes, BigInt(replacement.length));
+    assert.equal(image.imageMetadata?.sizeBytes, BigInt(replacement.length));
+    assert.equal(image.imageMetadata?.width, 1024);
+    assert.equal(image.imageMetadata?.height, 768);
+  });
+
+  it("keeps unchanged images supported with matching metadata", async () => {
+    const folder = await makeSafeFolder("library-image-scan-stable");
+    const bytes = pngMetadataFixture();
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "stable.png"), bytes);
+
+    const scan = await scanBridgeRoot(root.id);
+    const image = scan.files[0];
+
+    assert.equal(image.readStatus, "SUPPORTED");
+    assert.equal(image.checksum, createHash("sha256").update(bytes).digest("hex"));
+    assert.equal(image.imageMetadata?.width, 640);
+    assert.equal(image.imageMetadata?.height, 480);
   });
 
   it("reports stale roots, revoked read permission, and missing files safely", async () => {

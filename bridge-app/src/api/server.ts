@@ -5,6 +5,7 @@ import {
   assertBridgeExecutionAllowed,
   executeBridgePlanActions,
   executeBridgeUndoActions,
+  recoverBridgePhysicalActions,
   previewBridgeUndo,
   previewBridgeExecution,
 } from "../filesystem/operations";
@@ -409,6 +410,13 @@ async function handleAuthenticatedRequest(
     return;
   }
 
+  if (rootMatch && request.method === "POST" && rootMatch.action === "physical-recovery") {
+    const body = await readJsonBody(request);
+    sendJson(request, response, 200, { ok: true, recovery: await recoverBridgePhysicalActions(rootMatch.rootId,
+      body.undo === true ? undoActionsFromBody(body.actions) : actionsFromBody(body.actions), body.undo === true) });
+    return;
+  }
+
   if (rootMatch && request.method === "POST" && rootMatch.action === "execute") {
     const body = await readJsonBody(request);
 
@@ -416,6 +424,7 @@ async function handleAuthenticatedRequest(
       execution: await executeBridgePlanActions(
         rootMatch.rootId,
         actionsFromBody(body.actions),
+        typeof body.expectedRootRevision === "number" ? body.expectedRootRevision : undefined,
       ),
       ok: true,
     });
@@ -447,6 +456,7 @@ async function handleAuthenticatedRequest(
       undo: await executeBridgeUndoActions(
         rootMatch.rootId,
         undoActionsFromBody(body.actions),
+        typeof body.expectedRootRevision === "number" ? body.expectedRootRevision : undefined,
       ),
     });
     return;
@@ -459,7 +469,7 @@ async function handleAuthenticatedRequest(
   );
 }
 
-export function createBridgeServer() {
+export function createBridgeServer(options: { isCloudPaired?: () => Promise<boolean> } = {}) {
   return createServer((request, response) => {
     void (async () => {
       applyCors(request, response);
@@ -478,11 +488,16 @@ export function createBridgeServer() {
       validateOrigin(request);
 
       if (request.method === "GET" && requestUrl.pathname === "/bridge/v1/health") {
+        // A running loopback server and a local pairing secret do not attest
+        // cloud device pairing. Never default to paired on an unpaired Bridge.
+        const paired = options.isCloudPaired
+          ? await options.isCloudPaired().catch(() => false)
+          : false;
         sendJson(request, response, 200, {
           ok: true,
-          paired: true,
+          paired,
           platform: process.platform,
-          status: "BRIDGE_READY",
+          status: paired ? "BRIDGE_READY" : "BRIDGE_NOT_PAIRED",
           version: bridgeVersion,
         });
         return;
