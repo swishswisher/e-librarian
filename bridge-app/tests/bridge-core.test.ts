@@ -787,27 +787,23 @@ describe("NSN Bridge core", () => {
     const root = await connectFolder(folder);
     await writeFile(imagePath, pngMetadataFixture());
 
-    const scan = await scanBridgeRoot(root.id, {
-      imageMetadataExtractor: async (...args) => {
-        const metadata = await extractImageMetadata(...args);
-        await writeFile(imagePath, pngMetadataFixture(800, 600));
-        return metadata;
-      },
-    });
-
-    assert.equal(scan.failedFiles, 1);
-    assert.equal(scan.supportedFiles, 0);
-    assert.deepEqual(scan.files[0], {
-      checksum: null,
-      fileType: "IMAGE_PNG",
-      lastModified: null,
-      localPath: `bridge://${root.id}/changing.png`,
-      readStatus: "FAILED",
-      relativePath: "changing.png",
-      scanError: "The Bridge could not inspect this file safely.",
-      sizeBytes: null,
-      sourceCreatedAt: null,
-    });
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        imageMetadataExtractor: async (...args) => {
+          const metadata = await extractImageMetadata(...args);
+          await writeFile(imagePath, pngMetadataFixture(800, 600));
+          return metadata;
+        },
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+    const stable = await scanBridgeRoot(root.id);
+    assert.equal(stable.failedFiles, 0);
+    assert.equal(stable.supportedFiles, 1);
+    assert.equal(stable.files[0]?.readStatus, "SUPPORTED");
+    assert.equal(stable.files[0]?.checksum,
+      createHash("sha256").update(pngMetadataFixture(800, 600)).digest("hex"));
   });
 
   it("uses the replacement image stats when replacement happens before the checksum guard", async () => {
@@ -817,9 +813,15 @@ describe("NSN Bridge core", () => {
     await writeFile(imagePath, pngMetadataFixture());
     const replacement = Buffer.concat([pngMetadataFixture(1024, 768), Buffer.alloc(37, 7)]);
 
-    const scan = await scanBridgeRoot(root.id, {
-      beforeImageChecksum: async () => writeFile(imagePath, replacement),
-    });
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async () => writeFile(imagePath, replacement),
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+    // A fresh scan after the mutation settles verifies the new identity.
+    const scan = await scanBridgeRoot(root.id);
     const image = scan.files[0];
 
     assert.equal(image.readStatus, "SUPPORTED");
