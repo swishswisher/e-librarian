@@ -457,16 +457,22 @@ describe("Bridge effective Home health", () => {
     });
   }
 
-  it("keeps Home ready when the local Bridge is directly reachable", () => {
+  it("does not claim this account is ready merely because a local Bridge has credentials", () => {
+    // Local /health only establishes that *some* pairing key is present; the
+    // paired account and server may be unrelated to the current user.
     const health = effectiveBridgeHealth(localReady, [], now);
-    const home = display(health, []);
+    assert.equal(health.ok, false);
+    assert.equal(health.paired, false);
+    assert.equal(health.status, "BRIDGE_UNAVAILABLE");
+  });
 
+  it("treats only an authorized current cloud device as ready, even with local credentials", () => {
+    const devices = [device()];
+    const health = effectiveBridgeHealth(localReady, devices, now);
+    const home = display(health, devices);
     assert.equal(health.ok, true);
-    assert.equal(health.status, "BRIDGE_READY");
     assert.equal(home.badgeLabel, "Bridge ready");
-    assert.equal(home.thisMacLabel, "This Mac is online");
-    assert.equal(home.deviceLabel, "This Mac");
-    assert.equal(home.versionLabel, "0.1.0");
+    assert.equal(home.deviceLabel, "Deanne's Intel Mac");
   });
 
   it("uses a recent ONLINE cloud heartbeat when local Bridge is unavailable", () => {
