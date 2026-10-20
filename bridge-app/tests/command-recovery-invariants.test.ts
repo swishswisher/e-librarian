@@ -152,14 +152,19 @@ test("ROOT-2 native grant mutation queued before execution is rechecked inside t
   assert.equal(await readFile(path.join(f.directory, "source.txt"), "utf8"), f.bytes);
 });
 
-test("READ-1 a stalled temporary read cannot block the next independent file", async () => {
-  let finishSlowRead!: (value: string) => void;
-  const slowRead = new Promise<string>((resolve) => { finishSlowRead = resolve; });
+test("READ-1 a stalled temporary text read is aborted before another file is examined", async () => {
+  let aborted = false;
+  const slowRead = (signal: AbortSignal) => new Promise<string>((_resolve, reject) => {
+    signal.addEventListener("abort", () => {
+      aborted = true;
+      reject(signal.reason);
+    }, { once: true });
+  });
   await assert.rejects(
     withBoundedTemporaryRead(slowRead, 20),
     (error) => error instanceof BridgeAppError && error.code === "READ_COMMAND_TIMEOUT",
   );
-  const next = await withBoundedTemporaryRead(Promise.resolve("A valid independent file"), 200);
+  assert.equal(aborted, true, "The pending read must receive its cancellation signal.");
+  const next = await withBoundedTemporaryRead(async () => "A valid independent file", 200);
   assert.equal(next, "A valid independent file");
-  finishSlowRead("Late previous read");
 });

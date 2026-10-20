@@ -68,11 +68,11 @@ test("#6 a corrupt seven-byte UTF-8 file fails promptly and never blocks the nex
   assert.equal(scan.totalFiles, 2);
   const startedAt = Date.now();
   await assert.rejects(
-    withBoundedTemporaryRead(readBridgeRootFile(f.rootId, "garbled_utf8.txt"), 4_000),
+    withBoundedTemporaryRead((signal) => readBridgeRootFile(f.rootId, "garbled_utf8.txt", { signal }), 4_000),
     (error) => error instanceof BridgeAppError && error.code === "FILE_INVALID_ENCODING",
   );
   assert.ok(Date.now() - startedAt < 4_000, "corrupt bytes must not monopolize reading");
-  const good = await withBoundedTemporaryRead(readBridgeRootFile(f.rootId, "valid.txt"), 4_000);
+  const good = await withBoundedTemporaryRead((signal) => readBridgeRootFile(f.rootId, "valid.txt", { signal }), 4_000);
   assert.equal(good.extractedText, "An independent synthetic document.");
   assert.equal(good.sourceChecksum, createHash("sha256").update("An independent synthetic document.").digest("hex"));
 });

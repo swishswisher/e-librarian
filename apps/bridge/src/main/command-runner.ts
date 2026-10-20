@@ -52,26 +52,38 @@ import {
 import { readBridgeSecret, saveBridgeSecret } from "./keychain";
 
 const temporaryReadDeadlineMs = 90_000;
-// Only temporary reads have a deadline. Execution and Undo instead use
-// durable physical journals and never time out into speculative retries.
-// Late read completion cannot replace the already settled command report.
-export function withBoundedTemporaryRead<T>(
-  task: Promise<T>,
+// Only cancellable native text reads have a deadline here. PDF, DOCX and
+// media use their existing processing paths: a Promise.race timeout must never
+// abandon an uninterruptible parser or a child process in the background.
+// Physical execution and Undo follow durable journals, not timers.
+export async function withBoundedTemporaryRead<T>(
+  task: (signal: AbortSignal) => Promise<T>,
   deadlineMs = temporaryReadDeadlineMs,
 ): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
       reject(new BridgeAppError(
         "The temporary read exceeded its safe deadline.",
-        "READ_COMMAND_TIMEOUT",
-        504,
+        "READ_COMMAND_TIMEOUT", 504,
       ));
     }, deadlineMs);
-    task.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error) => { clearTimeout(timer); reject(error); },
-    );
   });
+  try {
+    return await Promise.race([task(controller.signal), deadline]);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new BridgeAppError(
+        "The temporary read exceeded its safe deadline.",
+        "READ_COMMAND_TIMEOUT", 504,
+      );
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 const replayCacheSecret = "processed-command-replay-keys";
@@ -335,11 +347,16 @@ async function executeCommand(
       return resumeBridgeWatcher(requiredRootId(command));
     case "STOP_WATCHING":
       return stopBridgeWatcher(requiredRootId(command));
-    case "READ_FILE_TEMPORARILY":
-      return withBoundedTemporaryRead(readBridgeRootFile(
-        requiredRootId(command),
-        typeof payload.relativePath === "string" ? payload.relativePath : "",
-      ));
+    case "READ_FILE_TEMPORARILY": {
+      const rootId = requiredRootId(command);
+      const relativePath = typeof payload.relativePath === "string" ? payload.relativePath : "";
+      // The bounded path passes cancellation into streaming checksums and
+      // text reads; non-cancellable media/PDF parsers are never detached.
+      return /\.(?:txt|md|markdown|html|htm)$/iu.test(relativePath)
+        ? withBoundedTemporaryRead((signal) =>
+            readBridgeRootFile(rootId, relativePath, { signal }))
+        : readBridgeRootFile(rootId, relativePath);
+    }
     case "PREVIEW_EXECUTION":
       return previewBridgeExecution(
         requiredRootId(command),
