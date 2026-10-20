@@ -1741,6 +1741,30 @@ export function suppressBroadCategoryMove(
 
 // A nested destination is a real client/project scope, not merely a topic.
 // Shared clinical vocabulary cannot justify crossing either named ancestor.
+export function archiveOwnerScope(relativePath: string) {
+  const [section, owner] = relativePath.replaceAll("\\", "/").split("/").filter(Boolean);
+  return (section === "00_EXISTING_ARCHIVE" || section === "08_DEEP_ARCHIVES") && owner
+    ? `${section}/${owner}` : null;
+}
+
+// This final publication gate applies to document, image, audio and video
+// proposals, not only the topic-rule generator. Human-approved destinations
+// remain reviewable; an archive's client boundary is never inferred from topics.
+export function archiveSuggestionPathAllowed(
+  sourceRelativePath: string,
+  proposedRelativePath: string | null | undefined,
+  approvedDestinations: string[] = [],
+) {
+  const ownerScope = archiveOwnerScope(sourceRelativePath);
+  if (!ownerScope || !proposedRelativePath) return true;
+  const destination = proposedRelativePath.replaceAll("\\", "/").replace(/^\/+/, "");
+  if (destination.startsWith(`${ownerScope}/`)) return true;
+  return approvedDestinations.some((folder) => {
+    const normalizedFolder = folder.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+    return normalizedFolder.length > 0 && destination.startsWith(`${normalizedFolder}/`);
+  });
+}
+
 export function crossesNamedOrganizationBoundary(sourceRelativePath: string, destinationFolder: string) {
   const source = sourceRelativePath.replaceAll("\\", "/").split("/").filter(Boolean).slice(0, -1);
   const destination = destinationFolder.replaceAll("\\", "/").split("/").filter(Boolean);
@@ -2944,12 +2968,29 @@ async function persistDrafts(
     context.currentRelativePath,
     drafts.map(cleanDraftPaths),
   );
+  const approvedDestinationPaths = context.approvedPreferences.map(
+    (preference) => preference.destinationRelativePath,
+  );
   const safeReconciledDrafts = reconciledDrafts.flatMap((draft) => {
+    const moveProposal = ["MOVE_FILE", "MOVE_AND_RENAME_FILE", "GROUP_WITH_FILES", "CREATE_FOLDER"]
+      .includes(draft.suggestionType);
+    if (moveProposal && !archiveSuggestionPathAllowed(
+      context.currentRelativePath, draft.proposedRelativePath, approvedDestinationPaths,
+    )) return [];
+    // Alternatives cannot smuggle a different archive owner's destination
+    // past the primary proposal's boundary check.
+    const safeDraft = {
+      ...draft,
+      alternatives: draft.alternatives.filter((alternative) =>
+        archiveSuggestionPathAllowed(
+          context.currentRelativePath, alternative.proposedRelativePath, approvedDestinationPaths,
+        )),
+    };
     if (draft.suggestionType !== "POSSIBLE_DUPLICATE") {
-      return [draft];
+      return [safeDraft];
     }
 
-    const duplicateEvidence = draft.duplicateEvidence.filter(
+    const duplicateEvidence = safeDraft.duplicateEvidence.filter(
       (match) =>
         !samePhysicalFilePresentation(
           {
@@ -2963,9 +3004,9 @@ async function persistDrafts(
     return duplicateEvidence.length > 0
       ? [
           {
-            ...draft,
+            ...safeDraft,
             duplicateEvidence,
-            supportingInformation: draft.supportingInformation.filter(
+            supportingInformation: safeDraft.supportingInformation.filter(
               (detail) =>
                 !draft.duplicateEvidence.some(
                   (match) =>

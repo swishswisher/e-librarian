@@ -701,6 +701,23 @@ describe("NSN Bridge core", () => {
     assert.equal(scan.files[0].checksum, createHash("sha256").update("Synthetic worksheet.\\n").digest("hex"));
   });
 
+  it("rejects an in-place file replacement even when its relative path is unchanged", async () => {
+    const folder = await makeSafeFolder("library-inventory-same-path-race");
+    const root = await connectFolder(folder);
+    await writeFile(path.join(folder, "original.png"), pngMetadataFixture());
+    await assert.rejects(
+      () => scanBridgeRoot(root.id, {
+        beforeImageChecksum: async (filePath) => {
+          // This changes the inode's size/timestamps without changing the
+          // parent directory listing or replacing its filename.
+          await writeFile(filePath, Buffer.from("changed file content in place"));
+        },
+      }),
+      (error) => error instanceof BridgeAppError &&
+        error.code === "SCAN_INVENTORY_UNVERIFIED",
+    );
+  });
+
   it("rejects a changed file inventory rather than publishing an incomplete scan", async () => {
     const folder = await makeSafeFolder("library-inventory-race");
     const root = await connectFolder(folder);

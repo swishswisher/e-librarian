@@ -60,6 +60,13 @@ const ignoredSystemFileNames = new Set([
   "thumbs.db",
 ]);
 
+function nativeScanIdentity(stats: {
+  dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint; mode: bigint;
+}) {
+  return [stats.dev, stats.ino, stats.size, stats.mtimeNs, stats.ctimeNs, stats.mode]
+    .map(String).join(":");
+}
+
 type ScanBridgeRootOptions = {
   beforeImageChecksum?: (filePath: string) => Promise<void>;
   imageMetadataExtractor?: typeof extractImageMetadata;
@@ -160,6 +167,12 @@ async function fileDraft(
 
     if (fileType.startsWith("IMAGE_")) await beforeImageChecksum?.(filePath);
     const checksumBefore = await checksumFile(filePath);
+    const checksumStats = await lstat(filePath);
+    if (!checksumStats.isFile() || checksumStats.isSymbolicLink() ||
+        !sameFileIdentity(stats, checksumStats)) {
+      throw new BridgeAppError("This file changed during checksum inspection.",
+        "FILE_CHANGED_DURING_SCAN", 409);
+    }
     let verifiedStats = stats;
     let imageMetadata: Awaited<ReturnType<typeof extractImageMetadata>> | null = null;
     let checksumAfter = checksumBefore;
@@ -184,6 +197,13 @@ async function fileDraft(
         "FILE_CHANGED_DURING_SCAN",
         409,
       );
+    }
+
+    const finalFileStats = await lstat(filePath);
+    if (!finalFileStats.isFile() || finalFileStats.isSymbolicLink() ||
+        !sameFileIdentity(verifiedStats, finalFileStats)) {
+      throw new BridgeAppError("This file changed during the scan.",
+        "FILE_CHANGED_DURING_SCAN", 409);
     }
 
     return {
@@ -217,6 +237,7 @@ async function scanDirectory(
   rootPath: string,
   currentPath: string,
   files: BridgeScannedFileDraft[],
+  nativeIdentities: Map<string, string>,
   imageMetadataExtractor: typeof extractImageMetadata,
   beforeImageChecksum?: (filePath: string) => Promise<void>,
 ) {
@@ -241,7 +262,7 @@ async function scanDirectory(
       continue;
     }
 
-    const stats = await lstat(entryPath).catch(() => null);
+    const stats = await lstat(entryPath, { bigint: true }).catch(() => null);
 
     if (!stats) {
       files.push({
@@ -257,6 +278,8 @@ async function scanDirectory(
       });
       continue;
     }
+
+    nativeIdentities.set(relativePath, nativeScanIdentity(stats));
 
     if (stats.isSymbolicLink()) {
       files.push({
@@ -274,7 +297,7 @@ async function scanDirectory(
     }
 
     if (stats.isDirectory()) {
-      await scanDirectory(rootId, rootPath, entryPath, files, imageMetadataExtractor, beforeImageChecksum);
+      await scanDirectory(rootId, rootPath, entryPath, files, nativeIdentities, imageMetadataExtractor, beforeImageChecksum);
       continue;
     }
 
@@ -287,15 +310,25 @@ async function scanDirectory(
 // Re-enumerate names after collecting metadata. A changed directory listing
 // must never be published as a complete snapshot (including a false empty scan).
 // This is intentionally a names-only pass: no second content upload or checksum.
-async function visiblePaths(rootPath: string, directory: string, paths: Set<string>) {
+async function visiblePaths(
+  rootPath: string, directory: string, paths: Set<string>,
+  nativeIdentities: Map<string, string>,
+) {
   const entries = await readdir(directory, { withFileTypes: true });
   for (const entry of entries) {
     const absolute = path.join(directory, entry.name);
     const relative = relativePathFor(rootPath, absolute);
     if (shouldIgnore(relative)) continue;
-    if (entry.isDirectory()) {
-      await visiblePaths(rootPath, absolute, paths);
-    } else if (entry.isFile() || entry.isSymbolicLink()) {
+    const verified = await lstat(absolute, { bigint: true }).catch(() => null);
+    if (!verified || nativeIdentities.get(relative) !== nativeScanIdentity(verified)) {
+      throw new BridgeAppError(
+        "A file or directory changed identity while scanning the connected folder.",
+        "SCAN_INVENTORY_UNVERIFIED", 409,
+      );
+    }
+    if (verified.isDirectory() && !verified.isSymbolicLink()) {
+      await visiblePaths(rootPath, absolute, paths, nativeIdentities);
+    } else if (verified.isFile() || verified.isSymbolicLink()) {
       paths.add(relative);
     }
   }
@@ -311,6 +344,7 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
   const root = await requireRootPermission(rootId, "readPermission", "scan files");
   const startedAt = new Date();
   const files: BridgeScannedFileDraft[] = [];
+  const nativeIdentities = new Map<string, string>();
   const rootBefore = await lstat(root.actualPath, { bigint: true }).catch(() => null);
   if (!rootBefore?.isDirectory() || rootBefore.isSymbolicLink()) {
     throw new BridgeAppError(
@@ -333,6 +367,7 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
     root.actualPath,
     root.actualPath,
     files,
+    nativeIdentities,
     options.imageMetadataExtractor ?? extractImageMetadata,
     options.beforeImageChecksum,
   );
@@ -350,7 +385,7 @@ async function scanBridgeRootOwned(rootId: string, options: ScanBridgeRootOption
 
   const publishedPaths = new Set(files.map((file) => file.relativePath));
   const verifiedPaths = new Set<string>();
-  await visiblePaths(root.actualPath, root.actualPath, verifiedPaths);
+  await visiblePaths(root.actualPath, root.actualPath, verifiedPaths, nativeIdentities);
   const finalRoot = await lstat(root.actualPath, { bigint: true }).catch(() => null);
   if (!finalRoot?.isDirectory() || finalRoot.isSymbolicLink() ||
       rootBefore.dev !== finalRoot.dev || rootBefore.ino !== finalRoot.ino ||

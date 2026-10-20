@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { suppressBroadCategoryMove } from "../../src/lib/bridge/organization-suggestions";
+import { archiveSuggestionPathAllowed, suppressBroadCategoryMove } from "../../src/lib/bridge/organization-suggestions";
 
 test("client, project and existing archive hierarchies are not flattened by generic clinical terms", () => {
   for (const source of [
@@ -28,4 +28,15 @@ test("unstructured inbox files receive cautious suggestions without erasing name
   }
   assert.equal(suppressBroadCategoryMove("Client_A/Notes/file.txt", "Client_A/Workshops"), false,
     "Moving to a specifically scoped subfolder is evaluated by separate identity and permission checks.");
+});
+
+test("archive scope applies to media, group moves, and alternatives, not just document rules", () => {
+  const owner = "00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Restorative_Practices/workshop.mp3";
+  assert.equal(archiveSuggestionPathAllowed(owner, "Audio/Workshops/workshop.mp3"), false);
+  assert.equal(archiveSuggestionPathAllowed(owner, "Video/Interviews/recording.mov"), false);
+  assert.equal(archiveSuggestionPathAllowed(owner, "00_EXISTING_ARCHIVE/Juniper_Kite_Collective/Clinical Tools/workshop.mp3"), false);
+  assert.equal(archiveSuggestionPathAllowed(owner, "00_EXISTING_ARCHIVE/Harbor_Fern_Alliance/Clinical Tools/workshop.mp3"), true);
+  assert.equal(archiveSuggestionPathAllowed(owner, "Audio/Workshops/workshop.mp3", ["Audio/Workshops"]), true);
+  assert.equal(archiveSuggestionPathAllowed("01_MIXED_INBOX/Downloads/workshop.mp3", "Audio/Workshops/workshop.mp3"), true);
+  assert.equal(archiveSuggestionPathAllowed(owner, null), true);
 });
