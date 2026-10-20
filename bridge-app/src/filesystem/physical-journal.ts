@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, rename, rmdir } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readdir, rename, rmdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { readLocalJson, withLocalStoreLock, writeLocalJson } from "../main/local-json-store";
@@ -138,6 +138,50 @@ async function cleanupCompletedDirectoryRemoval(entry: Journal) {
   await syncDirectory(path.dirname(entry.destination));
   return entry;
 }
+// A raced filesystem provider may replace the owned empty directory just
+// before the name is captured. The foreign directory must remain inspectable
+// at its public name: recreate it exclusively and copy back without replacing
+// any unrelated public entry. Keep the original private capture and journal
+// until a human resolves the foreign ownership; never report Undo COMPLETED.
+async function exposeForeignCapturedDirectory(entry: Journal, captured: string) {
+  const occupant = await statOrAbsent(entry.destination);
+  if (occupant) return; // Never overwrite another directory or a new symlink.
+  try {
+    await mkdir(entry.destination); // Exclusive: EEXIST is a separate owner.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+    throw new PhysicalRecoveryRequired("Could not restore the raced directory path; preserve the private capture.");
+  }
+  const reservation = await statOrAbsent(entry.destination);
+  if (!reservation?.isDirectory() || reservation.isSymbolicLink()) {
+    throw new PhysicalRecoveryRequired("The raced directory path cannot establish safe ownership.");
+  }
+  try {
+    for (const item of await readdir(captured)) {
+      const current = await statOrAbsent(entry.destination);
+      if (!current?.isDirectory() || !samePhysicalIdentity(current, {
+        dev: reservation.dev.toString(), ino: reservation.ino.toString(), encoding: "bigint-v1",
+      })) throw new Error("The recovered public directory changed owners.");
+      // No dereferencing symlinks, no overwrites and no deletions. If copying
+      // is interrupted, the complete captured source remains for inspection.
+      await cp(path.join(captured, item), path.join(entry.destination, item), {
+        dereference: false, errorOnExist: true, force: false,
+        recursive: true, verbatimSymlinks: true,
+      });
+    }
+    const after = await statOrAbsent(entry.destination);
+    if (!after?.isDirectory() || !samePhysicalIdentity(after, {
+      dev: reservation.dev.toString(), ino: reservation.ino.toString(), encoding: "bigint-v1",
+    })) throw new Error("The recovered directory was replaced again.");
+    await syncDirectory(entry.destination);
+    await syncDirectory(path.dirname(entry.destination));
+  } catch {
+    throw new PhysicalRecoveryRequired(
+      "The foreign directory needs restoration inspection. Both the captured original and any partial public copy were preserved.",
+    );
+  }
+}
+
 async function finishDirectoryRemoval(entry: Journal) {
   const capture = entry.directoryCapture;
   const container = capture ? await statOrAbsent(capture.directory) : null;
@@ -146,8 +190,16 @@ async function finishDirectoryRemoval(entry: Journal) {
     throw new PhysicalRecoveryRequired("The private folder capture cannot establish ownership; preserve it for recovery.");
   const captured = path.join(capture.directory, "directory"), stats = await statOrAbsent(captured);
   if (stats) {
-    if (!stats.isDirectory() || stats.isSymbolicLink() || !samePhysicalIdentity(stats, entry.identity) || (await readdir(captured)).length)
-      throw new PhysicalRecoveryRequired("The captured folder is not the empty directory owned by this execution; preserve it for recovery.");
+    if (!stats.isDirectory() || stats.isSymbolicLink() || !samePhysicalIdentity(stats, entry.identity)) {
+      if (stats.isDirectory() && !stats.isSymbolicLink()) {
+        await exposeForeignCapturedDirectory(entry, captured);
+      }
+      throw new PhysicalRecoveryRequired(
+        "The captured folder is not the directory owned by this execution. Its public name was restored when safe; preserve the journal and private capture.",
+      );
+    }
+    if ((await readdir(captured)).length)
+      throw new PhysicalRecoveryRequired("The owned folder is no longer empty; preserve it for recovery.");
     // LINKED proves that the exact owned directory reached the private capture.
     // INTENT plus absence alone never proves that a removal occurred.
     entry.state = "LINKED"; await writeLocalJson(journalPath(entry.owner), entry);
@@ -179,8 +231,8 @@ export async function journaledRemoveFolder(owner: string, originalOwner: string
     await afterCaptureIntent?.();
     // Never rmdir the public name after a check: capture first, then verify what
     // rename actually captured. A raced unrelated folder remains intact inside
-    // the private capture and explicitly unresolved, never deleted/restored over
-    // another public entry. Directory hard links cannot provide safe restoration.
+    // its private capture and is exclusively copied back to the public path
+    // where safe, never replacing another public entry. Recovery stays pending.
     await rename(target, path.join(directory, "directory"));
     await syncDirectory(path.dirname(target)); await syncDirectory(directory);
     await afterCaptured?.();

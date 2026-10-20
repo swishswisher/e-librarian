@@ -182,15 +182,33 @@ test("FILE-1 folder replacement between verification and capture is retained unr
     await rename(folder, retained); await mkdir(folder);
     replacement = (await lstat(folder, { bigint: true })).ino;
     await writeFile(path.join(folder, "unapproved.txt"), "Unrelated contents must survive");
-  }), /not the empty directory owned/);
+  }), /not the directory owned/);
   const capture = (await readdir(f.directory)).find(name => name.startsWith(".nsn-remove-")); assert.ok(capture);
   assert.equal((await lstat(path.join(f.directory, capture, "directory"), { bigint: true })).ino, replacement);
   assert.equal(await readFile(path.join(f.directory, capture, "directory", "unapproved.txt"), "utf8"), "Unrelated contents must survive");
   assert.ok((await lstat(retained)).isDirectory());
-  await mkdir(folder); await writeFile(path.join(folder, "later.txt"), "A later public replacement");
-  await assert.rejects(recoverPhysicalAction("folder-race-undo"), /not the empty directory owned/);
+  assert.equal(await readFile(path.join(folder, "unapproved.txt"), "utf8"),
+    "Unrelated contents must survive", "The foreign directory must remain visible at its public name.");
+  await writeFile(path.join(folder, "later.txt"), "A later public replacement");
+  await assert.rejects(recoverPhysicalAction("folder-race-undo"), /not the directory owned/);
   assert.equal(await readFile(path.join(folder, "later.txt"), "utf8"), "A later public replacement");
   assert.equal(await readFile(path.join(f.directory, capture, "directory", "unapproved.txt"), "utf8"), "Unrelated contents must survive");
+});
+
+test("FILE-1 an empty unrelated folder raced into Undo is restored to its public name", async t => {
+  const f = await fixture(t), folder = path.join(f.directory, "empty-replacement"),
+    original = path.join(f.directory, "retained-approved-folder");
+  await journaledCreateFolder("owner-raced-empty", folder);
+  await assert.rejects(journaledRemoveFolder("undo-raced-empty", "owner-raced-empty", folder,
+    async () => { await rename(folder, original); await mkdir(folder); }),
+    /not the directory owned/);
+  assert.equal((await lstat(folder)).isDirectory(), true);
+  assert.deepEqual(await readdir(folder), []);
+  const captured = (await readdir(f.directory)).find(name => name.startsWith(".nsn-remove-"));
+  assert.ok(captured, "The original raced directory must be preserved for inspection.");
+  assert.equal((await lstat(path.join(f.directory, captured, "directory"))).isDirectory(), true);
+  await assert.rejects(recoverPhysicalAction("undo-raced-empty"), /not the directory owned/);
+  assert.equal((await lstat(folder)).isDirectory(), true);
 });
 
 test("RECOVER-1 captured folder Undo recovers only its exact private owner and preserves a new public name", async (t) => {
